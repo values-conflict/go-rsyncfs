@@ -1,4 +1,5 @@
 Project goals can be found in `goals.md`
+Implementation plan (tracked tasks) is in `plan.md`
 
 This repo follows [tianonfmt](https://github.com/values-conflict/tianonfmt) in Cute/Lenient mode throughout -- read the tianonfmt docs before writing any file.
 
