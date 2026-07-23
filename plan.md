@@ -6,7 +6,7 @@ As tasks are completed, ~~strikethrough~~ their titles (`### Task N -- do some s
 
 ## Phase 0: Foundation
 
-### Task 1 -- Multiplexed I/O layer (`mux/`)
+### ~~Task 1 -- Multiplexed I/O layer (`mux/`)~~
 
 **Goal:** Implement the binary multiplexed framing protocol as a standalone sub-package. This is genuinely reusable (any rsync implementation needs it) and cleanly separable from Client/Server logic.
 
