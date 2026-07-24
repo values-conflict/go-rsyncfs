@@ -201,6 +201,7 @@ func sendFile(w *mux.Writer, f fs.File, version int) error
 - Send rolling checksums (sum1 = Adler-like, sum2 = MD4/MD5 depending on negotiated digest)
 - Read delta map from client and transmit only mismatched blocks
 - Send `MSG_SUCCESS` with file index when done
+- **Role:** In this read-only FS context, the server acts as the *Sender* in rsync's terminology (providing data to a receiver).
 
 **Tests:**
 
@@ -213,7 +214,7 @@ func sendFile(w *mux.Writer, f fs.File, version int) error
 
 ### Task 8 -- Client struct & connection setup (`client.go`)
 
-**Goal:** Define the `Client` type and implement connection establishment + handshake from the client side. This mirrors Task 5 but in reverse direction.
+**Goal:** Define the `Client` type and implement connection establishment + handshake from the client side. This mirrors Task 5 but in reverse direction. It also handles "Root Mode" configuration where multiple modules are presented as a single FS tree.
 
 **Files:** `client.go`, `client_test.go`
 
@@ -259,7 +260,9 @@ func (s *Session) Open(name string) (fs.File, error)
 
 - For directories: request file list from server, parse wire format into directory entries
 - For regular files: trigger data transfer protocol -- send checksum header, read delta map and data blocks through mux layer
-- The returned `fs.File` implements both `Read()` (for regular files) and `Readdir()` (for directories)
+- The returned `fs.File` implements both `Read()` (for regular files) and `Readdir()` (for directories). It should also implement `io/fs.ReadLinkFileInfo` for symlinks.
+- **Root Mode:** If configured, the root directory is a virtual one containing entries for all available modules (and their comments), each leading to that module's own FS tree.
+- **Metadata Mapping:** Map rsync wire-format modes and permissions back to Go `os.FileMode`.
 
 **Tests:**
 
