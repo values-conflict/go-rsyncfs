@@ -2,15 +2,15 @@
 
 Each task below is designed to be implementable and testable in a single focused session (~30-60 min). Tasks build incrementally; earlier tasks unblock later ones.
 
-As tasks are completed, ~~strikethrough~~ their titles (`### Task N -- do some stuff` -> `### ~~Task N -- do some stuff~~`).
+As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N -- do some stuff` -> `### ~~Task N -- do some stuff~~`; `## Phase N: do stuff` -> `## ~~Phase N: do stuff~~`).
 
 ## Phase 0: Foundation
 
-### ~~Task 1 -- Multiplexed I/O layer (`mux/`)~~
+### ~~Task 1 -- Multiplexed I/O layer (`protocol/mux/`)~~
 
 **Goal:** Implement the binary multiplexed framing protocol as a standalone sub-package. This is genuinely reusable (any rsync implementation needs it) and cleanly separable from Client/Server logic.
 
-**Files:** `mux/mux.go`, `mux/mux_test.go`
+**Files:** `protocol/mux/mux.go`, `protocol/mux/mux_test.go`
 
 **API sketch:**
 
@@ -39,11 +39,11 @@ func (r *Reader) ReadMsg() (code uint8, payload []byte, err error)
 - Verify frame header encoding/decoding matches spec exactly
 - Edge cases: zero-length payload, max-size payload, truncated headers
 
-### Task 2 -- Integer wire encodings (`wireint.go`)
+### Task 2 -- Integer wire encodings (`protocol/wireint.go`)
 
 **Goal:** Implement the variable-length integer formats used in protocol ≥ 30 (varint, varlong) and legacy longint for older protocols.
 
-**Files:** `wireint.go`, `wireint_test.go`
+**Files:** `protocol/wireint.go`, `protocol/wireint_test.go`
 
 **API sketch:**
 
@@ -64,11 +64,11 @@ func ReadVarlong(r io.Reader, minBytes byte) (int64, error)
 - Verify wire format matches upstream source code exactly
 - Cross-check: varint(0), varint(-1), varint(max-int32), etc. produce expected byte sequences
 
-### Task 3 -- Greeting exchange (`greet.go`)
+### Task 3 -- Greeting exchange (`protocol/greet.go`)
 
 **Goal:** Implement Phase 1 of the rsync daemon protocol (text-based greeting negotiation).
 
-**Files:** `greet.go`, `greet_test.go`
+**Files:** `protocol/greet.go`, `protocol/greet_test.go`
 
 **API sketch:**
 
@@ -165,8 +165,8 @@ type HandleOptions struct {
 **API sketch:**
 
 ```go
-// SendFileList walks rootFS starting at basePath and writes entries to muxWriter.
-func sendFileList(mux *mux.Writer, rootFS fs.FS, basePath string, version int) error
+// SendFileList walks rootFS starting at basePath and writes entries to w.
+func sendFileList(w *mux.Writer, rootFS fs.FS, basePath string, version int) error
 ```
 
 **Key details:**
@@ -192,7 +192,7 @@ func sendFileList(mux *mux.Writer, rootFS fs.FS, basePath string, version int) e
 
 ```go
 // SendFile sends one file via the multiplexed I/O layer using rsync's block checksum protocol.
-func sendFile(mux *mux.Writer, f fs.File, version int) error
+func sendFile(w *mux.Writer, f fs.File, version int) error
 ```
 
 **Key details:**

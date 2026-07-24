@@ -6,7 +6,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/values-conflict/go-rsyncfs/mux"
+	"github.com/values-conflict/go-rsyncfs/protocol/mux"
 )
 
 func TestRoundTrip(t *testing.T) {
