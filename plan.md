@@ -39,7 +39,7 @@ func (r *Reader) ReadMsg() (code uint8, payload []byte, err error)
 - Verify frame header encoding/decoding matches spec exactly
 - Edge cases: zero-length payload, max-size payload, truncated headers
 
-### Task 2 -- Integer wire encodings (`protocol/wireint.go`)
+### ~~Task 2 -- Integer wire encodings (`protocol/wireint.go`)~~
 
 **Goal:** Implement the variable-length integer formats used in protocol ≥ 30 (varint, varlong) and legacy longint for older protocols.
 
