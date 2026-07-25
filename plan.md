@@ -57,12 +57,16 @@ func ReadVarlong(r io.Reader, minBytes byte) (int64, error)
 **Key details:**
 
 - All integer encodings in rsync use **little-endian** on the wire (confirmed from upstream `SIVAL()`/`SIVAL64()` macros).
+- Varint encoding is used for protocol ≥ 30 and supports values up to 2^31 - 1
+- Varlong encoding provides support for larger 64-bit values
+- Legacy longint format handles older protocols that don't have variable-length encodings
 
 **Tests:**
 
 - Round-trip all values across the full range of each encoding
 - Verify wire format matches upstream source code exactly
 - Cross-check: varint(0), varint(-1), varint(max-int32), etc. produce expected byte sequences
+- Error handling for malformed encoded data
 
 ### Task 3 -- Greeting exchange (`protocol/greet.go`)
 
@@ -177,7 +181,7 @@ func sendFileList(w *mux.Writer, rootFS fs.FS, basePath string, version int) err
 
 **Key details:**
 
-- Xmit flags encoding varies by protocol version (varint for ≥ 32, byte+extended for 28-31, single byte < 28)
+- Xmit flags encoding: varint when `CF_VARINT_FLIST_FLAGS` is negotiated via compat exchange (introduced in v32-era rsync), otherwise byte+extended for ≥ 28 or single byte < 28
 - Delta-encoded: mode/uid/gid/mtime/name reuse previous values when same
 - End-of-list marker (`NDX_DONE` = -1) with compressed NDX encoding for proto ≥ 30
 
@@ -333,6 +337,56 @@ func (s *Session) Open(name string) (fs.File, error)
 - Matrix: client@vN × server@vM → correct negotiated version for all pairs in [20..32]
 - Version-specific wire format tests (e.g., varint only appears ≥ 30, extended xflags ≥ 28)
 - Fallback behavior when features are unavailable at lower versions
+
+## Protocol Version Coverage & Testing Strategy
+
+### Detailed Protocol Support Requirements:
+
+1. **Version Range**: Full support for protocol versions 20 through 32 (with forward-compatibility to MAX_PROTOCOL_VERSION 40)
+
+2. **Key Differences by Version**:
+
+   - Versions < 28: Single byte xmit flags, basic file list encoding
+   - Versions 28-31: Extended xmit flag format with additional metadata fields
+   - Versions ≥ 30: Varint/varlong encodings (varints for counts/indices, varlongs for file sizes/timestamps) instead of fixed-width integers
+   - Compat flag negotiation (`CF_VARINT_FLIST_FLAGS`): when both sides advertise support via client_info string, xmit flags use varint encoding regardless of major protocol version; introduced in v32-era rsync
+
+3. **Version Negotiation Testing**:
+
+   - Matrix testing: client@vN × server@vM → correct negotiated version for all pairs in [20..32]
+   - Fallback behavior when features are unavailable at lower versions
+   - Proper handling of unsupported protocol combinations (should downgrade gracefully)
+
+### Comprehensive Testing Strategy:
+
+1. **Cross-Implementation Tests**:
+
+   - Client directly connected to Server instances using `io.Pipe()`
+   - Embedded test fixtures with known file content for byte-for-byte verification
+   - Integration testing across all supported versions
+   - Run `testing/fstest.TestFS` against our Client+Server pair as additional validation layer
+
+2. **Edge Case Testing**:
+
+   - Malformed greeting lines in handshake process
+   - Authentication failures and credential handling
+   - Invalid module names or access attempts
+   - Empty files, zero-length directories, symlinks with various targets
+   - Protocol version mismatches during negotiation
+
+3. **Error Handling Consistency**:
+
+   - All error messages must exactly match upstream rsync format for interoperability
+   - Error codes and prefixes should be identical (e.g., `@ERROR:` prefix)
+   - Use of "comma ok" idiom throughout for safe map lookups, type assertions
+   - Proper wrapping of errors with context using `%w` verb to enable error unwrapping via `errors.Is`
+
+4. **Integration Testing**:
+
+   - Tests against real rsync binary when available (skipped with `-short` or if not found)
+   - Server behind a stream driven by real rsync client for both pull and push scenarios
+   - Client connecting to actual daemon processes started during tests
+   - Process management requirements: all started rsync processes must be killed on test completion
 
 ## Future Phases (not yet planned into tasks)
 
