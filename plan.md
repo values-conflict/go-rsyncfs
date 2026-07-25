@@ -119,6 +119,12 @@ type ServerModule struct {
 func (s *Server) AddModule(m *ServerModule) error
 ```
 
+**Key Details:**
+
+- Server wraps local io/fs.FS and serves it over rsync protocol, but does NOT directly implement fs.FS interface in normal operation
+- In root mode scenarios with multiple modules, the server may need to provide virtual filesystem access (but this is a special case)
+- Error response formatting follows @ERROR: line format exactly as specified upstream
+
 **Tests:**
 
 - Adding/removing modules, duplicate name rejection
@@ -238,11 +244,19 @@ type Session struct {
 }
 ```
 
+**Key Details:**
+
+- Client implements `io/fs.FS` interface to present remote filesystem as local
+- In root mode, client presents multiple modules as a single virtual filesystem tree with module names as top-level directories
+- Root mode requires path routing logic between different backing FSes for each module
+- Session holds connection state and provides access to the fs.FS implementation
+
 **Tests:**
 
 - Client connects to our Server (Task 5) through `io.Pipe()` -- full handshake round-trip
 - Version negotiation works correctly in both directions
 - Module listing via client returns expected results
+- Root mode configuration properly routes requests between modules
 
 ### Task 9 -- Client: `Open` implementation (`client-open.go`)
 
@@ -256,13 +270,15 @@ type Session struct {
 func (s *Session) Open(name string) (fs.File, error)
 ```
 
-**Key details:**
+**Key Details:**
 
-- For directories: request file list from server, parse wire format into directory entries
+- Client's fs.FS implementation provides access to remote filesystem via rsync protocol
+- For directories: request file list from server, parse wire format into directory entries and return fs.File implementing ReadDirFile interface
 - For regular files: trigger data transfer protocol -- send checksum header, read delta map and data blocks through mux layer
-- The returned `fs.File` implements both `Read()` (for regular files) and `Readdir()` (for directories). It should also implement `io/fs.ReadLinkFileInfo` for symlinks.
-- **Root Mode:** If configured, the root directory is a virtual one containing entries for all available modules (and their comments), each leading to that module's own FS tree.
-- **Metadata Mapping:** Map rsync wire-format modes and permissions back to Go `os.FileMode`.
+- The returned `fs.File` implements both `Read()` (for regular files) and `Readdir()` (for directories)
+- Symlinks are handled by returning appropriate Mode() flags with target information when available
+- **Root Mode:** If configured, the root directory is a virtual one containing entries for all available modules (and their comments), each leading to that module's own FS tree. Path routing logic ensures requests go to correct backing filesystems.
+- **Metadata Mapping:** Map rsync wire-format modes and permissions back to Go `os.FileMode`
 
 **Tests:**
 
@@ -270,6 +286,7 @@ func (s *Session) Open(name string) (fs.File, error)
 - Open a directory → ReadDir returns correct entries with FileInfo
 - Symlink: Open resolves correctly, fs.ReadLink works if available
 - Error cases: non-existent path, permission denied from server side
+- Root mode: proper routing between different module backing FSes
 
 ### Task 10 -- Cross-implementation tests (`cross_test.go`)
 
