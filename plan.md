@@ -68,7 +68,7 @@ func ReadVarlong(r io.Reader, minBytes byte) (int64, error)
 - Cross-check: varint(0), varint(-1), varint(max-int32), etc. produce expected byte sequences
 - Error handling for malformed encoded data
 
-### Task 3 -- Greeting exchange (`protocol/greet.go`)
+### ~~Task 3 -- Greeting exchange (`protocol/greet.go`)~~
 
 **Goal:** Implement Phase 1 of the rsync daemon protocol (text-based greeting negotiation).
 
@@ -99,7 +99,7 @@ func Negotiate(local, remote Greeting) (version int, subProtocol byte, digest st
 
 ## Phase 1: Server (read-only, single module)
 
-### Task 4 -- Server struct & `@ERROR` handling (`server.go`)
+### ~~Task 4 -- Server struct & `@ERROR` handling (`server.go`)~~
 
 **Goal:** Define the `Server` type and implement error response formatting. This establishes the server's basic shape before any protocol logic.
 
