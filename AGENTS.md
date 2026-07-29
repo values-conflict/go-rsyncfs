@@ -8,4 +8,4 @@ Project-specific Go coding standards are in `coding-standards-go.md`
 
 Upstream (pinned to the most recent commit checked for upstream compatibility) is in a submodule at `.upstream`
 
-There is a rough summary of the upstream protocol in `protocol.md`, focused on details useful to implementing our tasks
+There is a rough summary of the upstream protocol in `protocol.md`, focused on details useful to implementing our tasks -- when ambiguous or too light on details, fall back on reading the upstream sources
