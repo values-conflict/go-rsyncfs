@@ -134,7 +134,7 @@ func (s *Server) AddModule(m *ServerModule) error
 - Adding/removing modules, duplicate name rejection
 - `@ERROR:` line formatting matches upstream format exactly
 
-### Task 5 -- Server: full handshake (`server-handshake.go`)
+### ~~Task 5 -- Server: full handshake (`server-handshake.go`)~~
 
 **Goal:** Implement the server-side connection handshake: greeting exchange → module selection → auth (if configured) → argument parsing. Returns control to caller when ready for data transfer, or an error at any point.
 
