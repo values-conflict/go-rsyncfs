@@ -91,7 +91,7 @@ func ReadVarlong(r io.Reader, minBytes byte) (int64, error) {
 
 	extra := int(intByteExtra[b2[0]/4])
 	u := make([]byte, 9)
-	copy(u, b2[1:]) // Copy bytes from index 1 of b2 to start of u. (C: memcpy(u.b, b2+1, min_bytes-1))
+	copy(u, b2[1:]) // copy bytes from index 1 of b2 to start of u (C: memcpy(u.b, b2+1, min_bytes-1))
 
 	if extra > 0 {
 		buf := make([]byte, extra)

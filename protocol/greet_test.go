@@ -61,7 +61,7 @@ func TestParseGreeting(t *testing.T) {
 				if !reflect.DeepEqual(g, tt.want) {
 					t.Errorf("ParseGreeting() got %+v, want %+v", g, tt.want)
 				}
-				// Round-trip check: Parse -> String should return the original input (normalized).
+				// round-trip check: Parse -> String should return the original input (normalized)
 				if g.String() != tt.input {
 					t.Errorf("RoundTrip failed:\nInput: %q\nGot:   %q", tt.input, g.String())
 				}

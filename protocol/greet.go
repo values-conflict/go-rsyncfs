@@ -10,7 +10,7 @@ import (
 type Greeting struct {
 	Version     int
 	SubProtocol byte
-	Digests     []string // Supported auth digest algorithms in preference order.
+	Digests     []string // supported auth digest algorithms in preference order
 }
 
 // ParseGreeting parses a raw greeting line from an rsync server or client.
@@ -77,14 +77,14 @@ func Negotiate(local, remote Greeting) (version int, subProtocol byte, digest st
 		subProtocol = remote.SubProtocol
 		if remote.SubProtocol != 0 {
 			version--
-			subProtocol = 0 // Downgrade to stable version of the lower protocol
+			subProtocol = 0 // downgrade to stable version of the lower protocol
 		}
 	} else if local.Version == remote.Version {
 		version = local.Version
 		subProtocol = local.SubProtocol
 		if local.SubProtocol != remote.SubProtocol {
 			version--
-			subProtocol = 0 // Downgrade to stable version of the lower protocol
+			subProtocol = 0 // downgrade to stable version of the lower protocol
 		}
 	} else { // local.Version < remote.Version
 		// If we are the older version and have a non-zero subprotocol, downgrade by one.
@@ -92,7 +92,7 @@ func Negotiate(local, remote Greeting) (version int, subProtocol byte, digest st
 		subProtocol = local.SubProtocol
 		if local.SubProtocol != 0 {
 			version--
-			subProtocol = 0 // Downgrade to stable version of the lower protocol
+			subProtocol = 0 // downgrade to stable version of the lower protocol
 		}
 	}
 

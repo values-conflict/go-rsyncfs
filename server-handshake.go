@@ -166,7 +166,7 @@ func (s *Server) sendModuleList(rw io.Writer) error {
 	return err
 }
 
-// readLine reads from rw until a newline character is encountered
+// readLine reads from rw until a newline character is encountered.
 func readLine(rw io.Reader) ([]byte, error) {
 	var buf []byte
 	b := make([]byte, 1)
@@ -183,7 +183,7 @@ func readLine(rw io.Reader) ([]byte, error) {
 	return buf, nil
 }
 
-// readNullTerminatedArgs reads arguments until double null
+// readNullTerminatedArgs reads arguments until double null.
 func readNullTerminatedArgs(rw io.Reader) ([]string, error) {
 	var args []string
 	var currentArg []byte
@@ -205,8 +205,7 @@ func readNullTerminatedArgs(rw io.Reader) ([]string, error) {
 				args = append(args, string(currentArg))
 				currentArg = nil
 			} else if len(args) == 0 {
-				// First arg is always ".", but it might be empty?
-				// Actually rsync usually sends "." as the first arg.
+				// empty first arg -- rsync normally sends "." here
 			}
 		} else {
 			lastWasNull = false
@@ -221,7 +220,7 @@ func readNullTerminatedArgs(rw io.Reader) ([]string, error) {
 	return args, nil
 }
 
-// readNewlineTerminatedArgs reads arguments until double newline
+// readNewlineTerminatedArgs reads arguments until double newline.
 func readNewlineTerminatedArgs(rw io.Reader) ([]string, error) {
 	var args []string
 	var currentArg []byte
