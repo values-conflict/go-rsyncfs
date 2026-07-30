@@ -192,7 +192,7 @@ func sendFileList(w *mux.Writer, rootFS fs.FS, basePath string, version int) err
 - Symlink entries encode target correctly
 - Empty directory produces correct end-of-list marker
 
-### Task 7 -- Server: file data transfer (`server-transfer.go`)
+### ~~Task 7 -- Server: file data transfer (`server-transfer.go`)~~
 
 **Goal:** Implement the server-side data sender: given a file, compute block checksums and handle delta requests from the client. This is the core of rsync's efficient transfer algorithm.
 
