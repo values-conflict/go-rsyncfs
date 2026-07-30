@@ -161,7 +161,7 @@ func TestHandleConnection_AuthSuccess(t *testing.T) {
 
 	conn.Write([]byte("@RSYNCD: 32.0 md5\n"))
 	conn.Write([]byte("testmod\n"))
-	
+
 	buf = make([]byte, 1024)
 	n, err = conn.Read(buf)
 	if err != nil {
@@ -174,7 +174,7 @@ func TestHandleConnection_AuthSuccess(t *testing.T) {
 
 	authResponse := fmt.Sprintf("alice %s\n", base64.StdEncoding.EncodeToString([]byte("valid-hash")))
 	conn.Write([]byte(authResponse))
-	
+
 	conn.Write([]byte(".\x00\x00"))
 
 	if err := <-errChan; err != nil {
@@ -222,7 +222,7 @@ func TestHandleConnection_AuthFailure(t *testing.T) {
 
 	conn.Write([]byte("@RSYNCD: 32.0 md5\n"))
 	conn.Write([]byte("testmod\n"))
-	
+
 	buf = make([]byte, 1024)
 	_, _ = conn.Read(buf)
 

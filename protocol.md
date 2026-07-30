@@ -157,26 +157,27 @@ If no flags set (`!(xflags & 0xFF)`): add harmless flag (`XMIT_LONG_NAME` for no
 ### Xmit Flag Bits (basic, always present)
 
 ```go
-XMIT_SAME_MODE    = 1 << 0   // mode same as previous entry → skip mode field
-XMIT_SAME_UID     = 1 << 1   // uid same as previous → skip uid fields
-XMIT_SAME_GID     = 1 << 2   // gid same as previous → skip gid fields
-XMIT_SAME_TIME    = 1 << 3   // mtime same as previous → skip mtime field
-XMIT_SAME_NAME    = 1 << 4   // filename shares prefix with previous name
-XMIT_LONG_NAME    = 1 << 5   // filename suffix length > 255 bytes
-XMIT_TOP_DIR      = 1 << 6   // top-level directory (for recursive transfers)
-XMIT_EXTENDED_FLAGS = 1 << 7 // extended flags follow (second byte for proto < 32, or varint continuation for ≥ 32)
+XMIT_TOP_DIR          = 1 << 0   // top-level directory (for recursive transfers)
+XMIT_SAME_MODE        = 1 << 1   // mode same as previous entry → skip mode field
+XMIT_EXTENDED_FLAGS   = 1 << 2   // extended flags follow (proto ≥ 28)
+XMIT_SAME_UID         = 1 << 3   // uid same as previous → skip uid fields
+XMIT_SAME_GID         = 1 << 4   // gid same as previous → skip gid fields
+XMIT_SAME_NAME        = 1 << 5   // filename shares prefix with previous name
+XMIT_LONG_NAME        = 1 << 6   // filename suffix length > 255 bytes
+XMIT_SAME_TIME        = 1 << 7   // mtime same as previous → skip mtime field
 ```
 
-### Extended Flags (when XMIT_EXTENDED_FLAGS is set)
+### Extended Flags (when XMIT_EXTENDED_FLAGS is set, proto ≥ 28)
 
 | Flag | Value | Protocol Requirement | Meaning |
-|------|-------|---------------------|---------|
-| `XMIT_SAME_RDEV_MAJOR` | `1 << 8` | proto ≥ 28 | Device major number same as previous |
-| `XMIT_HLINKED` | `1 << 9` (pre-30) / varies | — | File is part of a hard-link group |
-| `XMIT_HLINK_FIRST` | `1 << 10` | proto ≥ 30 | First entry in hard-link group; reference index follows |
-| `XMIT_MOD_NSEC` | `1 << 12` | proto ≥ 31 | Nanosecond mtime component follows |
-| `XMIT_CRTIME_EQ_MTIME` | `1 << 14` | proto ≥ 31, crtimes enabled | Creation time equals modification time |
-| `XMIT_SAME_ATIME` | `1 << 15` | — | Access time same as previous entry |
+| `XMIT_SAME_RDEV_MAJOR` / `XMIT_NO_CONTENT_DIR` | `1 << 8` | proto ≥ 28 / ≥ 30 | Device major same (devices) / not a content dir (dirs) |
+| `XMIT_HLINKED` | `1 << 9` | proto ≥ 28 | File is part of a hard-link group |
+| `XMIT_SAME_DEV_pre30` / `XMIT_USER_NAME_FOLLOWS` | `1 << 10` | proto 28-29 / ≥ 30 | Same device (pre-30) / username follows (≥ 30) |
+| `XMIT_RDEV_MINOR_8_pre30` / `XMIT_GROUP_NAME_FOLLOWS` | `1 << 11` | proto 28-29 / ≥ 30 | 8-bit minor (pre-30) / groupname follows (≥ 30) |
+| `XMIT_HLINK_FIRST` / `XMIT_IO_ERROR_ENDLIST` | `1 << 12` | proto ≥ 30 / ≥ 31 | First in hard-link group / I/O error endlist |
+| `XMIT_MOD_NSEC` | `1 << 13` | proto ≥ 31 | Nanosecond mtime component follows |
+| `XMIT_SAME_ATIME` | `1 << 14` | any proto | Access time same as previous entry |
+| `XMIT_CRTIME_EQ_MTIME` | `1 << 17` | varint xflags | Creation time equals modification time |
 
 ### File Entry Wire Layout (field order)
 

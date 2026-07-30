@@ -166,7 +166,7 @@ type HandleOptions struct {
 - Auth challenge/response flow (with and without callback)
 - Argument parsing: null-terminated (proto ≥ 30) vs newline-terminated
 
-### Task 6 -- Server: file list generation (`server-flist.go`)
+### ~~Task 6 -- Server: file list generation (`server-flist.go`)~~
 
 **Goal:** Walk the backing FS and emit a file list in rsync wire format. This is the server-side equivalent of `send_files()` for the listing phase.
 

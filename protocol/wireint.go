@@ -27,7 +27,7 @@ func WriteVarint(w io.Writer, x int32) error {
 		cnt++
 		b[0] = ^(bit - 1)
 	} else if cnt > 1 {
-		b[0] = b[cnt] | ^(bit*2-1)
+		b[0] = b[cnt] | ^(bit*2 - 1)
 	} else {
 		b[0] = b[1]
 	}
@@ -73,7 +73,7 @@ func WriteVarlong(w io.Writer, x int64, minBytes byte) error {
 		cnt++
 		b[0] = ^(bit - 1)
 	} else if cnt > int(minBytes) {
-		b[0] = b[cnt] | ^(bit*2-1)
+		b[0] = b[cnt] | ^(bit*2 - 1)
 	} else {
 		b[0] = b[cnt]
 	}

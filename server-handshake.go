@@ -19,7 +19,7 @@ type HandshakeResult struct {
 
 // HandleOptions provides configuration for handling a connection's handshake.
 type HandleOptions struct {
-	LocalGreeting protocol.Greeting                                           // what version/digests we advertise
+	LocalGreeting protocol.Greeting                                       // what version/digests we advertise
 	AuthCallback  func(username string, challenge []byte) ([]byte, error) // nil = no auth required
 }
 
@@ -29,7 +29,7 @@ func (s *Server) HandleConnection(rw io.ReadWriter, opts HandleOptions) (*Handsh
 	// use a simple byte-by-byte reading approach to avoid over-reading into Phase 4
 
 	// --- Phase 1: Greeting Exchange ---
-	
+
 	// send server greeting
 	if _, err := rw.Write([]byte(opts.LocalGreeting.String())); err != nil {
 		return nil, fmt.Errorf("failed to send greeting: %w", err)
