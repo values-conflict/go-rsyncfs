@@ -222,9 +222,9 @@ func sendFile(w *mux.Writer, f fs.File, version int) error
 
 ## Phase 2: Client (`io/fs.FS` implementation)
 
-### Task 8 -- Client struct & connection setup (`client.go`)
+### ~~Task 8 -- Client struct & connection setup (`client.go`)~~
 
-**Goal:** Define the `Client` type and implement connection establishment + handshake from the client side. This mirrors Task 5 but in reverse direction. It also handles "Root Mode" configuration where multiple modules are presented as a single FS tree.
+**Goal:** Define the `Client` type and implement connection establishment + handshake from the client side. This mirrors Task 5 but in reverse direction.
 
 **Files:** `client.go`, `client_test.go`
 
@@ -251,20 +251,18 @@ type Session struct {
 **Key Details:**
 
 - Client implements `io/fs.FS` interface to present remote filesystem as local
-- In root mode, client presents multiple modules as a single virtual filesystem tree with module names as top-level directories
-- Root mode requires path routing logic between different backing FSes for each module
 - Session holds connection state and provides access to the fs.FS implementation
+- **Root mode is NOT part of Task 8.** The `#list` protocol call closes the server connection (verified against upstream), so root mode cannot use a single persistent connection. It requires a separate rearchitecture (see Task 9).
 
 **Tests:**
 
 - Client connects to our Server (Task 5) through `io.Pipe()` -- full handshake round-trip
 - Version negotiation works correctly in both directions
 - Module listing via client returns expected results
-- Root mode configuration properly routes requests between modules
 
-### Task 9 -- Client: `Open` implementation (`client-open.go`)
+### Task 9 -- Client: `Open` implementation + root mode rearchitecture (`client-open.go`)
 
-**Goal:** Implement `fs.FS.Open` for the client side. Opening a file triggers the server-side data transfer protocol (Tasks 6 + 7).
+**Goal:** Implement `fs.FS.Open` for the client side. Opening a file triggers the server-side data transfer protocol (Tasks 6 + 7). Also rearchitect root mode to handle the fact that `#list` closes the connection.
 
 **Files:** `client-open.go`, `client-open_test.go`
 
@@ -281,8 +279,8 @@ func (s *Session) Open(name string) (fs.File, error)
 - For regular files: trigger data transfer protocol -- send checksum header, read delta map and data blocks through mux layer
 - The returned `fs.File` implements both `Read()` (for regular files) and `Readdir()` (for directories)
 - Symlinks are handled by returning appropriate Mode() flags with target information when available
-- **Root Mode:** If configured, the root directory is a virtual one containing entries for all available modules (and their comments), each leading to that module's own FS tree. Path routing logic ensures requests go to correct backing filesystems.
 - **Metadata Mapping:** Map rsync wire-format modes and permissions back to Go `os.FileMode`
+- **Root Mode rearchitecture:** Since `#list` closes the server connection (verified against upstream), root mode cannot use a single persistent connection. `Session` in root mode acts as a config holder (connection params, not a live socket). `ReadDir` on root opens a fresh connection, sends `#list`, reads modules, and closes. `Open` on a module path opens a fresh connection to that specific module. Each FS operation gets its own connection.
 
 **Tests:**
 
@@ -290,7 +288,8 @@ func (s *Session) Open(name string) (fs.File, error)
 - Open a directory → ReadDir returns correct entries with FileInfo
 - Symlink: Open resolves correctly, fs.ReadLink works if available
 - Error cases: non-existent path, permission denied from server side
-- Root mode: proper routing between different module backing FSes
+- Root mode: `ReadDir` on root does a live `#list` call (fresh connection each time)
+- Root mode: entering a module directory opens a separate connection to that module
 
 ### Task 10 -- Cross-implementation tests (`cross_test.go`)
 
@@ -393,7 +392,6 @@ func (s *Session) Open(name string) (fs.File, error)
 These are noted from goals.md but deferred until Phase 1-3 are complete:
 
 - **Writability:** bidirectional transfers (push files to server, accept pushes on server)
-- **Root mode:** modules as top-level directories in a single FS instance
 - **Caching / partial transfer:** delta-transfer resume with cache layer
 - **Compression:** `--compress` equivalent
 - **Extended metadata:** hardlinks, ACLs, xattrs, nanosecond timestamps, device files

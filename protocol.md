@@ -56,6 +56,8 @@ Server sends tab-separated lines, then terminator:
 @RSYNCD: EXIT\n          // protocol ≥ 25; EOF for older protocols
 ```
 
+**Important:** After sending the listing, the server **closes the connection** (the child process calls `_exit()`). The `#list` request cannot be combined with any subsequent protocol phases on the same connection. Each `#list` requires its own dedicated connection.
+
 ### Authentication Challenge (if module requires auth)
 Server → Client: `@RSYNCD: AUTHREQD <challenge>\n` where `<challenge>` is base64-encoded random data.
 

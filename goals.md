@@ -56,6 +56,8 @@ It should be possible to:
 
 In root mode, there should be some way to present each module's "comment" value inside the filesystem representation. Exact shape is TBD (the filesystem doesn't have great places for freeform metadata) -- possibilities include a filename that cannot be a valid module name like `<module>\t<comment>` (matching the `#list` protocol itself, sorting correctly in `ls`), or a virtual file at the root, etc.
 
+**Connection model constraint:** The server closes the connection after `#list` (verified against upstream -- the child process calls `_exit()` immediately after `send_listing()`). This means root mode cannot use a single persistent connection. Each `#list` call (root `ls`) and each module access requires its own dedicated connection. The `Session` in root mode is a config holder, not a live connection.
+
 ### Server Side
 
 A single `Server` instance should accept any number of module-to-`io/fs.FS` mappings. Each module is configured via some kind of `ServerModule` wrapping struct that includes:

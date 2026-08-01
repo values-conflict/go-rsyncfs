@@ -3,6 +3,7 @@ package rsyncfs
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"strings"
@@ -71,10 +72,11 @@ Loop:
 
 		if string(line) == "#list" {
 			// handle #list request
+			// the server closes the connection after #list (upstream exits the child process)
 			if err := s.sendModuleList(rw); err != nil {
 				return nil, fmt.Errorf("failed to send module list: %w", err)
 			}
-			continue Loop
+			return nil, fmt.Errorf("connection closed after #list")
 		}
 
 		moduleName := string(line)
@@ -124,9 +126,12 @@ Loop:
 		if _, err := rw.Write([]byte("@RSYNCD: OK\n")); err != nil {
 			return nil, fmt.Errorf("failed to send auth success: %w", err)
 		}
-	} else if selectedModule != nil {
-		// some rsync versions might still expect an "OK" or just proceed;
-		// protocol.md says @RSYNCD: OK follows successful authentication
+	} else {
+		// no auth required -- send OK to signal module selection succeeded
+		// this matches real rsync behavior: server always sends AUTHREQD or OK after module selection
+		if _, err := rw.Write([]byte("@RSYNCD: OK\n")); err != nil {
+			return nil, fmt.Errorf("failed to send OK: %w", err)
+		}
 	}
 
 	// --- Phase 3: Argument Transmission ---
@@ -145,6 +150,23 @@ Loop:
 	}
 
 	_ = args // mark as used for now until we need them in HandshakeResult
+
+	// --- Phase 4: Protocol Version Exchange (binary) ---
+	// server sends its protocol version as int32 LE
+	var protoBuf [4]byte
+	binary.LittleEndian.PutUint32(protoBuf[:], uint32(version))
+	if _, err := rw.Write(protoBuf[:]); err != nil {
+		return nil, fmt.Errorf("failed to send protocol version: %w", err)
+	}
+
+	// read client's protocol version response
+	if _, err := io.ReadFull(rw, protoBuf[:]); err != nil {
+		return nil, fmt.Errorf("failed to read client protocol version: %w", err)
+	}
+	clientProto := int(binary.LittleEndian.Uint32(protoBuf[:]))
+	if clientProto < version {
+		version = clientProto
+	}
 
 	return &HandshakeResult{
 		Module:  selectedModule,

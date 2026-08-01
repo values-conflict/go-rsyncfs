@@ -3,6 +3,7 @@ package rsyncfs
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"strings"
@@ -24,12 +25,20 @@ func (m *mockRW) Write(p []byte) (n int, err error) {
 	return m.writeBuf.Write(p)
 }
 
+// protoVersionBytes returns the protocol version as int32 LE (4 bytes).
+func protoVersionBytes(ver int) []byte {
+	b := make([]byte, 4)
+	binary.LittleEndian.PutUint32(b, uint32(ver))
+	return b
+}
+
 func TestHandleConnection_BasicSuccess(t *testing.T) {
 	mod := &ServerModule{Name: "testmod", Comment: "Test Module"}
 	s, _ := NewServer(mod)
 
+	// client greeting + module name + null-terminated args + client protocol version response
 	rw := &mockRW{
-		readBuf:  bytes.NewBufferString("@RSYNCD: 32.0 md5\ntestmod\n.\x00\x00"),
+		readBuf:  bytes.NewBuffer(append([]byte("@RSYNCD: 32.0 md5\ntestmod\n.\x00\x00"), protoVersionBytes(32)...)),
 		writeBuf: new(bytes.Buffer),
 	}
 
@@ -63,8 +72,10 @@ func TestHandleConnection_ModuleList(t *testing.T) {
 	mod2 := &ServerModule{Name: "mod2", Comment: "Comment 2"}
 	s, _ := NewServer(mod1, mod2)
 
+	// #list causes the server to close the connection (upstream exits the child process)
+	// so we only send the greeting and #list, nothing after
 	rw := &mockRW{
-		readBuf:  bytes.NewBufferString("@RSYNCD: 32.0 md5\n#list\nmod1\n.\x00\x00"),
+		readBuf:  bytes.NewBuffer([]byte("@RSYNCD: 32.0 md5\n#list\n")),
 		writeBuf: new(bytes.Buffer),
 	}
 
@@ -72,13 +83,12 @@ func TestHandleConnection_ModuleList(t *testing.T) {
 		LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
 	}
 
-	res, err := s.HandleConnection(rw, opts)
-	if err != nil {
-		t.Fatalf("Handshake failed: %v", err)
+	_, err := s.HandleConnection(rw, opts)
+	if err == nil {
+		t.Fatal("expected error after #list (connection closed)")
 	}
-
-	if res.Module != mod1 {
-		t.Errorf("Expected module mod1, got %v", res.Module)
+	if !strings.Contains(err.Error(), "connection closed after #list") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 
 	output := rw.writeBuf.String()
@@ -175,7 +185,31 @@ func TestHandleConnection_AuthSuccess(t *testing.T) {
 	authResponse := fmt.Sprintf("alice %s\n", base64.StdEncoding.EncodeToString([]byte("valid-hash")))
 	conn.Write([]byte(authResponse))
 
+	// read @RSYNCD: OK
+	buf = make([]byte, 1024)
+	n, err = conn.Read(buf)
+	if err != nil {
+		t.Fatalf("failed to read auth OK: %v", err)
+	}
+	okResp := string(buf[:n])
+	if !bytes.Contains([]byte(okResp), []byte("@RSYNCD: OK")) {
+		t.Fatalf("expected OK, got %q", okResp)
+	}
+
+	// send arguments
 	conn.Write([]byte(".\x00\x00"))
+
+	// read server protocol version
+	buf = make([]byte, 4)
+	n, err = conn.Read(buf)
+	if err != nil {
+		t.Fatalf("failed to read server protocol version: %v", err)
+	}
+	_ = n
+	_ = binary.LittleEndian.Uint32(buf[:n]) // server protocol version
+
+	// send client protocol version response
+	conn.Write(protoVersionBytes(32))
 
 	if err := <-errChan; err != nil {
 		t.Fatalf("Handshake failed: %v", err)
@@ -243,7 +277,7 @@ func TestHandleConnection_ArgumentsProto30Plus(t *testing.T) {
 	s, _ := NewServer(mod)
 
 	rw := &mockRW{
-		readBuf:  bytes.NewBufferString("@RSYNCD: 32.0 md5\ntestmod\narg1\x00arg2\x00.\x00\x00"),
+		readBuf:  bytes.NewBuffer(append([]byte("@RSYNCD: 32.0 md5\ntestmod\narg1\x00arg2\x00.\x00\x00"), protoVersionBytes(32)...)),
 		writeBuf: new(bytes.Buffer),
 	}
 
@@ -266,7 +300,7 @@ func TestHandleConnection_ArgumentsProtoLegacy(t *testing.T) {
 	s, _ := NewServer(mod)
 
 	rw := &mockRW{
-		readBuf:  bytes.NewBufferString("@RSYNCD: 29.0 md5\ntestmod\narg1\narg2\n.\n\n"),
+		readBuf:  bytes.NewBuffer(append([]byte("@RSYNCD: 29.0 md5\ntestmod\narg1\narg2\n.\n\n"), protoVersionBytes(29)...)),
 		writeBuf: new(bytes.Buffer),
 	}
 
@@ -281,5 +315,54 @@ func TestHandleConnection_ArgumentsProtoLegacy(t *testing.T) {
 
 	if res.Version > 29 {
 		t.Errorf("Expected version <= 29, got %d", res.Version)
+	}
+}
+
+func TestHandleConnection_NoAuth(t *testing.T) {
+	// verify that server sends @RSYNCD: OK when no auth is configured
+	mod := &ServerModule{Name: "testmod", Comment: "Test Module"}
+	s, _ := NewServer(mod)
+
+	rw := &mockRW{
+		readBuf:  bytes.NewBuffer(append([]byte("@RSYNCD: 32.0 md5\ntestmod\n.\x00\x00"), protoVersionBytes(32)...)),
+		writeBuf: new(bytes.Buffer),
+	}
+
+	opts := HandleOptions{
+		LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
+	}
+
+	_, err := s.HandleConnection(rw, opts)
+	if err != nil {
+		t.Fatalf("Handshake failed: %v", err)
+	}
+
+	output := rw.writeBuf.String()
+	if !bytes.Contains([]byte(output), []byte("@RSYNCD: OK\n")) {
+		t.Errorf("Server did not send OK, got %q", output)
+	}
+}
+
+func TestHandleConnection_VersionDowngrade(t *testing.T) {
+	// server sends v32 but client responds with v28 protocol version
+	mod := &ServerModule{Name: "testmod", Comment: "Test Module"}
+	s, _ := NewServer(mod)
+
+	rw := &mockRW{
+		readBuf:  bytes.NewBuffer(append([]byte("@RSYNCD: 32.0 md5\ntestmod\n.\x00\x00"), protoVersionBytes(28)...)),
+		writeBuf: new(bytes.Buffer),
+	}
+
+	opts := HandleOptions{
+		LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
+	}
+
+	res, err := s.HandleConnection(rw, opts)
+	if err != nil {
+		t.Fatalf("Handshake failed: %v", err)
+	}
+
+	if res.Version != 28 {
+		t.Errorf("Expected downgraded version 28, got %d", res.Version)
 	}
 }
