@@ -1,1 +1,0 @@
-- Session's Client should probably be a copy, not a pointer, right?  same with Connect's receiver?  (especially since applyDefaults is mutable and we don't want changes to that Client outside our code to affect how the handshakes work, etc)  maybe if Connect's receiver were a copy, Session's Client can stay a pointer since it'd be a pointer to that new copy?

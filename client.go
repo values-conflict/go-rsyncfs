@@ -100,7 +100,7 @@ type moduleInfo struct {
 // If rw is nil and ConnectFunc is set, ConnectFunc is called with the configured module name to create the connection automatically.
 //
 // In root mode (Module == ""), use [Client.OpenRoot] instead -- the server closes the connection after #list, so a single persistent connection is not possible.
-func (c *Client) Connect(rw io.ReadWriter) (*Session, error) {
+func (c Client) Connect(rw io.ReadWriter) (*Session, error) {
 	if c.Module == "" {
 		return nil, fmt.Errorf("root mode requires OpenRoot, not Connect (server closes connection after #list)")
 	}
@@ -142,7 +142,7 @@ func (c *Client) Connect(rw io.ReadWriter) (*Session, error) {
 	}
 
 	s := &Session{
-		client:     c,
+		client:     &c,
 		rw:         rw,
 		version:    version,
 		digest:     digest,
@@ -247,7 +247,7 @@ func (c *Client) Connect(rw io.ReadWriter) (*Session, error) {
 // Instead, the Session holds the client config and uses ConnectFunc to create fresh connections for each FS operation.
 //
 // The server closes the connection after #list, so root mode cannot use a single persistent connection. Each ls at the root and each module access gets its own connection.
-func (c *Client) OpenRoot() (*Session, error) {
+func (c Client) OpenRoot() (*Session, error) {
 	if c.Module != "" {
 		return nil, fmt.Errorf("OpenRoot requires Module == \"\", got %q -- use Connect instead", c.Module)
 	}
@@ -264,7 +264,7 @@ func (c *Client) OpenRoot() (*Session, error) {
 	// a proper implementation would open a connection, do greeting exchange, then close
 
 	return &Session{
-		client:      c,
+		client:      &c,
 		version:     c.Greeting.Version,
 		digest:      c.Greeting.Digests[0],
 		connectFunc: c.ConnectFunc,
