@@ -2,11 +2,13 @@
 
 This document covers code style, design philosophy, testing, and idiomatic patterns for Go projects.  It is intended for human contributors and LLM assistants alike.  Where LLMs tend to default to patterns from other languages (Java, TypeScript, Python), those patterns are called out explicitly.
 
+This document is intentionally project-generic so it can be reused across Go projects.  Keep examples and terminology generic -- domain-specific concepts belong in project-specific docs, not here.
+
 ---
 
 ## Philosophy
 
-Go is opinionated by design.  Fighting the language costs more than it saves.  When something feels awkward in Go — wrapping every return in a result type, adding a base class, injecting a logger into every struct — that friction is usually a signal to reconsider the approach, not to push through.
+Go is opinionated by design.  Fighting the language costs more than it saves.  When something feels awkward in Go -- wrapping every return in a result type, adding a base class, injecting a logger into every struct -- that friction is usually a signal to reconsider the approach, not to push through.
 
 **Simple over clever.** Code is read far more than it is written.  A boring solution that a newcomer can read in 30 seconds beats a sophisticated one that requires context to understand.
 
@@ -18,7 +20,7 @@ Go is opinionated by design.  Fighting the language costs more than it saves.  W
 
 ### Formatting
 
-All Go code is formatted with `gofmt` (or `goimports`).  There is no style debate about indentation, brace placement, or line length.  If a tool can decide it, let the tool decide it — do not reconfigure it.
+All Go code is formatted with `gofmt` (or `goimports`).  There is no style debate about indentation, brace placement, or line length.  If a tool can decide it, let the tool decide it -- do not reconfigure it.
 
 Run `goimports` (not just `gofmt`) to keep imports sorted and grouped:
 
@@ -28,10 +30,10 @@ Run `goimports` (not just `gofmt`) to keep imports sorted and grouped:
 
 ### Naming
 
-- **Packages**: lowercase, single word when possible (`store`, `httputil`, `auth`).  Avoid `util`, `common`, `helpers`, `misc` — these are symptom packages that collect things with no real relationship.
+- **Packages**: lowercase, single word when possible (`store`, `httputil`, `auth`).  Avoid `util`, `common`, `helpers`, `misc` -- these are symptom packages that collect things with no real relationship.
 - **Functions and methods**: `MixedCase` for exported, `mixedCase` for unexported.  Acronyms are all-caps: `HTTPClient`, `parseURL`, `userID`.
-- **Interfaces**: name by behavior, not by noun.  `Reader`, `Stringer`, `Handler` — not `IReader`, `ReaderInterface`, `AbstractHandler`.
-- **Error variables**: `ErrNotFound`, `ErrTimeout` — prefix with `Err`.
+- **Interfaces**: name by behavior, not by noun.  `Reader`, `Stringer`, `Handler` -- not `IReader`, `ReaderInterface`, `AbstractHandler`.
+- **Error variables**: `ErrNotFound`, `ErrTimeout` -- prefix with `Err`.
 - **Boolean variables**: name as assertions: `isReady`, `hasMore`, `ok`.
 - **Receiver names**: short, consistent, derived from the type name.  `c` for `Client`, `s` for `Server`.  Never `self` or `this`.
 - **Loop variables**: short is fine in tight scopes (`i`, `v`, `k`).  Longer names only when the variable escapes or the scope is large.
@@ -50,7 +52,7 @@ Comments are for the *why*, not the *what*.  If the code already says what it do
 i++
 
 // Good: explains a non-obvious constraint
-// Skip the first byte — the framing protocol reserves it as a version tag.
+// Skip the first byte -- the framing protocol reserves it as a version tag.
 data = data[1:]
 ```
 
@@ -70,7 +72,7 @@ type UserStore interface {
     GetUser(id int) (*User, error)
     SaveUser(u *User) error
 }
-type postgresUserStore struct { ... }
+type sqliteUserStore struct { ... }
 
 // Good: start with the concrete type
 type UserStore struct { db *sql.DB }
@@ -99,10 +101,10 @@ func NewClient(cfg Config) *Client
 Every type that claims to implement an interface gets a compile-time assertion adjacent to the type definition:
 
 ```go
-var _ simulacra.FilesystemPlugin = (*Ext4Plugin)(nil) // in ext4_plugin.go, top of file
+var _ Store = (*SQLiteStore)(nil)
 ```
 
-Fails to compile if `*Ext4Plugin` stops implementing `FilesystemPlugin`.  No test infrastructure required; this is the Go standard for this pattern.
+Fails to compile if `*SQLiteStore` stops implementing `Store`.  No test infrastructure required; this is the Go standard for this pattern.
 
 ### Small, focused packages
 
@@ -112,12 +114,12 @@ Package-level `init()` functions are almost always the wrong choice.  They run o
 
 ### Struct design
 
-Embed only when the embedded type's full API *belongs* on the outer type.  Embedding for code reuse (to avoid writing delegation methods) leads to leaky abstractions — callers get methods they didn't expect, and the inner type's API becomes part of the outer type's contract.
+Embed only when the embedded type's full API *belongs* on the outer type.  Embedding for code reuse (to avoid writing delegation methods) leads to leaky abstractions -- callers get methods they didn't expect, and the inner type's API becomes part of the outer type's contract.
 
 ```go
 // Bad: embedding sync.Mutex to avoid writing Lock()/Unlock() wrappers
 type Cache struct {
-    sync.Mutex   // now callers can Lock() a Cache directly — unintended
+    sync.Mutex   // now callers can Lock() a Cache directly -- unintended
     data map[string]string
 }
 
@@ -130,41 +132,47 @@ type Cache struct {
 
 Zero-value usefulness: design structs so that `var x T` is valid and sensible.  `sync.Mutex`, `bytes.Buffer`, and `sync.WaitGroup` all work at zero value.  Reach for this where it makes initialization simpler.
 
-**Zero-value as ownership sentinel.** Add a separate `fooSet bool` field alongside a value *only* when the zero-value of the field is a legitimately owned state.  When the zero-value is unambiguously "not set" — empty string, nil pointer, zero for a counter that cannot meaningfully be zero — the value itself carries the ownership state and the bool is redundant noise.
+**Zero-value as "explicitly set" sentinel.** Add a separate `fooSet bool` field alongside a value *only* when the zero-value of the field is a legitimately set value.  When the zero-value unambiguously means "not set" -- empty string, nil pointer, zero for a counter that cannot meaningfully be zero -- the value itself carries that information and the bool is redundant noise.
 
 ```go
 // Bad: bool is redundant because "" is never a valid hostname
-type UTSNamespace struct {
+type Config struct {
     hostname    string
-    hostnameSet bool  // unnecessary — "" already means "not set"
+    hostnameSet bool  // unnecessary -- "" already means "not set"
 }
 
-// Good: "" delegates to parent; any non-empty value is owned
-type UTSNamespace struct {
-    hostname string  // "" = delegate to parent/host; non-empty = owned
+// Good: "" means "use default"; any non-empty value is explicitly set
+type Config struct {
+    hostname string  // "" = use default; non-empty = explicitly set
 }
 ```
 
-Contrast with `VirtualTimeNS.clockOwned bool`: a clock CAN legitimately be owned AND have a zero-value epoch (Unix time 0 is a real, specific timestamp), so the bool is load-bearing there.  When in doubt: ask "is the zero-value of this field a valid, meaningful owned state?"  If yes, add the bool.  If no, let the value speak for itself.
+When the zero-value is a valid set value (e.g. `Timeout` of `0` meaning "no timeout"), you have two options:
 
-### Functional options and godoc discoverability
+- **`*T` (pointer)** -- `nil` means unset.  One field, self-documenting, no sync risk.  Costs a nil check and an indirection on every access.  Prefer for config structs constructed once and read many times.
+- **`T` + `fooSet bool`** -- direct value access, no nil checks, no allocation.  Costs a second field that can drift out of sync.  Prefer on hot paths, frequently copied structs, or where the struct must be comparable.
 
-When building a set of related option generators, prefer **methods on the configuration type** (fluent builder) over free package-level functions.  Methods appear together in godoc under their type, and users discover them naturally via `.` autocomplete without needing to know naming conventions.
+### Config structs over functional options
+
+For a closed, finite, spec-driven option space, prefer a **plain `Config` struct** over functional options.  A `Config` struct puts all fields in one place in godoc, eliminates closure-per-field allocation overhead, and avoids the hidden-invariant problem where some options set unexported tracking fields that field-direct mutation silently bypasses.
+
+Functional options (`func WithX(v T) Option`) are appropriate when the option space is truly open-ended and grows over time across independent contributors.  When the set of options is known and bounded, a `Config` struct is simpler, more readable, and easier to reason about.
 
 ```go
-// Good: methods on MountSpec — godoc groups them under the type, autocomplete works
-func BindMount(src, dst string) MountSpec  { ... }
-func (m MountSpec) ReadOnly() MountSpec    { ... }
-func (m MountSpec) Overlay() MountSpec     { ... }
+// Good: all fields visible at a glance, zero allocations
+client, err := NewClient(Config{
+    Timeout:    30 * time.Second,
+    MaxRetries: 3,
+    BaseURL:    "https://api.example.com",
+})
 
-WithMount(BindMount("/a", "/").ReadOnly().Overlay())
-
-// Fallback (consistent prefix) when a fluent builder is architecturally awkward —
-// e.g. simple named constants, not method chains:
-const UlimitNoFile UlimitResource = 7     // FooOptBar* prefix groups in godoc
+// Functional options -- only when the option space is genuinely open-ended and multiple independent packages must contribute options to a type they don't own.
+// Example: a base logger package + independent middleware packages each providing With*.
 ```
 
-Avoid sub-packages for option types — they hurt discoverability (callers must know the package name to find anything) and make interface satisfaction across packages painful.  Use a consistent naming prefix (`FooOptBar`) as the fallback when methods on a type are genuinely awkward.  Bare package-level functions in a large package are the worst option: they scatter alphabetically with unrelated functions and cannot be discovered by browsing.
+**Fluent builders on the config type are discouraged but acceptable if they earn their weight.**  Methods on the configuration type (e.g. `Spec.ReadOnly()`, `Spec.AsOverlay()`) group naturally in godoc and work well with `.` autocomplete.  These are not the same as free-standing `With*` functional options -- they mutate and return the same struct value.
+
+Avoid sub-packages for option types -- they hurt discoverability (callers must know the package name to find anything) and make interface satisfaction across packages painful.  Use a consistent naming prefix (`FooOptBar`) as the fallback when methods on a type are genuinely awkward.  Bare package-level functions in a large package are the worst option: they scatter alphabetically with unrelated functions and cannot be discovered by browsing.
 
 ### `string` vs `io.Reader`, `[]byte` vs `io.Writer`
 
@@ -172,9 +180,9 @@ Choose parameter types based on how the data will actually arrive and how large 
 
 **Input:**
 
-- `string` — identity, names, keys, short config values.  Always fully materialized in memory; copying is cheap; comparison with `==` works.
-- `[]byte` — raw bytes that the caller already has in memory, often when working with encoding/decoding at a low level.
-- `io.Reader` — content of unknown or potentially large size: files, network responses, stdin.  Lets the caller stream without buffering the whole thing.
+- `string` -- identity, names, keys, short config values.  Always fully materialized in memory; copying is cheap; comparison with `==` works.
+- `[]byte` -- raw bytes that the caller already has in memory, often when working with encoding/decoding at a low level.
+- `io.Reader` -- content of unknown or potentially large size: files, network responses, stdin.  Lets the caller stream without buffering the whole thing.
 
 **Output:**
 
@@ -196,31 +204,24 @@ func (s *Store) Lookup(key string) (*Record, error)
 
 The same logic applies to functions that produce output: `func Render(w io.Writer, data any) error` composes with files, buffers, and HTTP writers without allocating an intermediate string.
 
-### Functional options for constructors
+### Constructors accept a Config struct
 
-When a constructor has more than ~3 optional parameters, prefer functional options over a config struct *only if* the options are truly independent and open-ended.  For a fixed, known set of config fields, a `Config` struct is simpler and more readable.
+When a constructor has more than ~3 optional parameters, pass a `Config` struct.  This is the default choice.  Functional options are only appropriate when the option space is genuinely open-ended and multiple independent packages must contribute options to a type they don't own.
 
 ```go
-// Config struct — good for finite, known configuration
 type Config struct {
     Timeout    time.Duration
     MaxRetries int
     BaseURL    string
 }
 func New(cfg Config) *Client { ... }
-
-// Functional options — good when callers come from different packages
-// and the option space grows over time
-type Option func(*client)
-func WithTimeout(d time.Duration) Option { return func(c *client) { c.timeout = d } }
-func New(opts ...Option) *Client { ... }
 ```
 
-Do not mix the two in the same constructor.
+Do not mix functional options and config structs in the same constructor.
 
 ### Error handling
 
-Return errors.  **Do not panic in library code** — not even for programmer errors.  A panic in an exported function forces callers to use `recover`, which is fragile and untestable.  A panic in a goroutine owned by a library terminates the whole process; callers cannot recover across goroutine boundaries.  Always return a descriptive error instead.
+Return errors.  **Do not panic in library code** -- not even for programmer errors.  A panic in an exported function forces callers to use `recover`, which is fragile and untestable.  A panic in a goroutine owned by a library terminates the whole process; callers cannot recover across goroutine boundaries.  Always return a descriptive error instead.
 
 The only acceptable use of `panic` is in unexported package-level init expressions (`var _ = mustCompile(...)`, `init()`) where there is genuinely no caller to receive an error and the failure indicates a deployment misconfiguration that should halt the process at startup.
 
@@ -260,7 +261,7 @@ When writing a CLI tool or any runnable program, put all meaningful logic in an 
 ```
 myapp/
   cmd/myapp/main.go   // flag parsing, os.Exit, wires everything together
-  internal/app/       // all real logic — importable, testable
+  internal/app/       // all real logic -- importable, testable
 ```
 
 `main` should do almost nothing that requires testing.  If you find yourself wanting to test logic that lives in `main.go`, move it into the library.
@@ -272,23 +273,23 @@ This pattern has concrete payoffs:
 - **Error handling**: libraries return errors; `main` decides whether to log and continue or print and `os.Exit(1)`.  The policy lives in one place.
 - **Separation of concerns**: flag names, env var names, and output formatting are UI decisions that belong in `main`, not buried in library code.
 
-Avoid `os.Exit` anywhere except `main`.  A library that calls `os.Exit` cannot be used in a larger program without killing the whole process.  Similarly, avoid writing to `os.Stdout` or `os.Stderr` from library code — accept an `io.Writer` parameter if output is needed, or return the data and let the caller decide what to do with it.
+Avoid `os.Exit` anywhere except `main`.  A library that calls `os.Exit` cannot be used in a larger program without killing the whole process.  Similarly, avoid writing to `os.Stdout` or `os.Stderr` from library code -- accept an `io.Writer` parameter if output is needed, or return the data and let the caller decide what to do with it.
 
 ### Embeddable CLIs
 
 A CLI built on the library-first pattern can go one step further: make the command structure itself composable and embeddable.  Instead of a monolithic `main` that owns all subcommands, define each command as a plain struct with a `Run(ctx context.Context, args []string) error` method (or similar).  The top-level `main` wires them together; another program can import and reuse individual commands without re-implementing the logic.
 
 ```go
-// cmd/myapp/main.go — wires and runs
-// internal/cmd/serve.go — ServeCommand struct, exported Run method
-// internal/cmd/migrate.go — MigrateCommand struct, exported Run method
+// cmd/myapp/main.go -- wires and runs
+// internal/cmd/serve.go -- ServeCommand struct, exported Run method
+// internal/cmd/migrate.go -- MigrateCommand struct, exported Run method
 ```
 
-The payoff is that commands become testable as units: construct the struct, call `Run`, assert on the result — no subprocess, no captured output, no temporary binaries.  It also makes it straightforward to embed your tool's functionality into a larger host binary (e.g. a debug or admin server that bundles several sub-tools).
+The payoff is that commands become testable as units: construct the struct, call `Run`, assert on the result -- no subprocess, no captured output, no temporary binaries.  It also makes it straightforward to embed your tool's functionality into a larger host binary (e.g. a debug or admin server that bundles several sub-tools).
 
 Output should flow through an `io.Writer` field on the command struct, not directly to `os.Stdout`.  This is the seam that makes testing and embedding work: in production, pass `os.Stdout`; in tests, pass a `bytes.Buffer`.
 
-**CLI framework conventions must not leak.** Design every CLI decision — subcommand organization, naming, flag placement, error messages — from the user's perspective, not the framework's.  If a user or operator can tell which CLI library was used by looking at the command tree or help output, the UX has failed.  Users should never need to know or care that simulacra uses Cobra.
+**CLI framework conventions must not leak.** Design every CLI decision -- subcommand organization, naming, flag placement, error messages -- from the user's perspective, not the framework's.  If a user or operator can tell which CLI library was used by looking at the command tree or help output, the UX has failed.  For example, users should never need to know or care which CLI framework (Cobra, etc) this project uses.
 
 ### Concurrency
 
@@ -428,11 +429,11 @@ func GetThing() *Thing {
 
 ### String building
 
-Use `strings.Builder` for building strings in a loop.  Do not concatenate with `+` in a loop — each `+` allocates a new string.  `fmt.Sprintf` is fine for one-off formatting but is slower than direct writes to a `Builder` or a `bytes.Buffer`.
+Use `strings.Builder` for building strings in a loop.  Do not concatenate with `+` in a loop -- each `+` allocates a new string.  `fmt.Sprintf` is fine for one-off formatting but is slower than direct writes to a `Builder` or a `bytes.Buffer`.
 
 ### Slices and maps
 
-Initialize slices with `make([]T, 0, n)` when the length is known ahead of time — this avoids repeated reallocations.  Initialize maps similarly with `make(map[K]V, n)`.
+Initialize slices with `make([]T, 0, n)` when the length is known ahead of time -- this avoids repeated reallocations.  Initialize maps similarly with `make(map[K]V, n)`.
 
 A nil slice and an empty slice are different in a `== nil` check but identical for `len`, `cap`, `range`, and `append`.  Return nil (not `[]T{}`) when there are no results, unless the caller marshals to JSON (where nil becomes `null` and `[]T{}` becomes `[]`).
 
@@ -507,7 +508,7 @@ Do not vendor dependencies unless the build environment requires it (air-gapped 
 
 ### Prefer the standard toolchain
 
-The Go toolchain is a build system.  `go build`, `go test`, `go vet`, and `go generate` handle the overwhelming majority of what a Makefile would do — and they do it without an extra tool in the dependency chain.
+The Go toolchain is a build system.  `go build`, `go test`, `go vet`, and `go generate` handle the overwhelming majority of what a Makefile would do -- and they do it without an extra tool in the dependency chain.
 
 Before reaching for a Makefile, check whether the toolchain already covers the need:
 
@@ -524,13 +525,13 @@ Before reaching for a Makefile, check whether the toolchain already covers the n
 | Format code (CI check) | `gofmt -s -w . && git diff --exit-code` |
 | Cross-compile | `GOOS=linux GOARCH=amd64 go build ./...` |
 
-A Makefile that wraps these commands one-for-one provides no value — it is just extra syntax to learn and maintain, and it hides what is actually running.
+A Makefile that wraps these commands one-for-one provides no value -- it is just extra syntax to learn and maintain, and it hides what is actually running.
 
 ### Do not use Makefiles
 
 Make is a build system for C. It understands file timestamps and C compilation units.  It does not understand Go modules, import graphs, or the Go toolchain's built-in dependency tracking.  Using Make for a Go project means maintaining a parallel, inferior build system on top of one that already works.
 
-When the need is "run a sequence of commands", the right tools are a shell script or a small Go program under `cmd/`.  Both are readable by anyone on the project without knowledge of Make's syntax, tab-sensitivity rules, or implicit variable semantics.  A `cmd/release/main.go` that builds, signs, and uploads is explicit Go code — it can be tested, it has proper error handling, and it does not require Make to be installed.
+When the need is "run a sequence of commands", the right tools are a shell script or a small Go program under `cmd/`.  Both are readable by anyone on the project without knowledge of Make's syntax, tab-sensitivity rules, or implicit variable semantics.  A `cmd/release/main.go` that builds, signs, and uploads is explicit Go code -- it can be tested, it has proper error handling, and it does not require Make to be installed.
 
 ### go generate
 
@@ -572,37 +573,15 @@ Package-level doc comments go in a file named `doc.go` (if the package is large)
 
 ---
 
-## Security Invariants
-
-These are hard correctness and security requirements for syscall handler code, not style preferences.  Violating them introduces TOCTOU vulnerabilities.
-
-### Copy-once for guest memory
-
-All reads from guest process memory (`process_vm_readv` or equivalent) MUST happen exactly once per syscall dispatch, at entry, before any handling logic runs.  Work only from the resulting Go struct or byte slice — never re-read from guest memory after the initial copy.
-
-**Why:** the guest runs concurrently with the supervisor.  Memory that is read and validated may be modified by the guest before it is acted on.  This is the classic double-fetch / TOCTOU pattern and it is exploitable.
-
-**API implication:** the syscall dispatcher must pass pre-copied argument structs to handlers, not raw guest addresses.  A handler receiving a `SyscallArgs` struct cannot accidentally re-read guest memory because the interface provides no way to do so.  Additional memory reads within a handler (e.g. reading an `iovec` array pointed to by a register argument) must go through a single-use `GuestMemReader` that returns a copy and cannot be called again for the same dispatch.
-
-### All guest-derived paths must route through the overlay
-
-Any supervisor file open where the path is derived from a guest-provided argument MUST be routed through the VFS overlay pipeline.  Direct host `open`/`openat` calls using guest-derived path strings are forbidden.
-
-The VFS layer enforces this structurally via `os.Root` / `openat2(RESOLVE_IN_ROOT)`.  If a handler appears to need a host file open that bypasses the overlay, reconsider the design — do not add a direct open with a comment.
-
-Exceptions require an `// ISOLATION:` comment explaining which invariant was checked and why the bypass is safe.
-
----
-
 ## Notes for LLM Assistants
 
 When generating or editing Go code in this project:
 
 - **Do not add interfaces speculatively.** If there is one concrete type, define a concrete type.  Extract an interface only when a second implementation exists or a test double is needed.
-- **Do not add `// TODO:` comments** for things the current task does not require.  Leave the code clean.
+- **Do not add `// TODO` comments** for things the current task does not require.  Leave the code clean.
 - **Do not add logging to library code.** Libraries accept a `logger` if they must, or they return errors.  Printing to stderr from a library is almost always wrong.
 - **Do not add `context.Background()` as a default.** If a function takes a context, require it from the caller.  Do not paper over the gap with `context.Background()` or `context.TODO()` inside library code.
-- **Match the existing style** in the file you are editing.  If the file uses `errors.New`, do not introduce `fmt.Errorf`.  If the file has no doc comments, do not add them to lines you are changing unless asked.
+- **Match the existing style** in the file you are editing.  If the file uses `errors.New`, do not introduce `fmt.Errorf`.
 - **Return the real type, not an interface**, unless the function is part of an existing API that already returns an interface.
 - **Do not add error wrapping that strips information.** `fmt.Errorf("error: %v", err)` without `%w` loses the original error type.  Use `%w` unless you intentionally want to hide the underlying error.
 - **Prefer `t.Fatal` over `t.Error` + `return`** in tests when continuing after a failure would cause a nil dereference or meaningless subsequent failures.
