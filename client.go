@@ -14,8 +14,9 @@ import (
 	"github.com/values-conflict/go-rsyncfs/protocol/mux"
 )
 
-// ClientConfig holds the configuration for an rsync client connection.
-type ClientConfig struct {
+// Client configures a connection to an rsync daemon module.
+// Construct directly with &Client{...}; zero-value fields use sensible defaults applied lazily during [Client.Connect] or [Client.OpenRoot].
+type Client struct {
 	// Module is the rsync module name to connect to.
 	// Empty string enables root mode (all modules as top-level directories).
 	Module string
@@ -43,7 +44,21 @@ type ClientConfig struct {
 	// In root mode, each FS operation (listing modules, opening a module)
 	// gets its own connection -- the server closes the connection after #list,
 	// so a single persistent connection is not possible.
+	//
+	// When used with [Client.Connect] and a nil io.ReadWriter, ConnectFunc
+	// is called with the configured Module name to create the connection.
 	ConnectFunc func(moduleName string) (io.ReadWriter, error)
+}
+
+// applyDefaults sets default greeting values if not already configured.
+func (c *Client) applyDefaults() {
+	if c.Greeting.Version == 0 {
+		c.Greeting.Version = 32
+		c.Greeting.SubProtocol = 0
+	}
+	if len(c.Greeting.Digests) == 0 {
+		c.Greeting.Digests = []string{"md5", "md4"}
+	}
 }
 
 // PasswordAuth returns an AuthResponse function that computes the standard rsync auth hash: digest(password + challenge) using the negotiated algorithm.
@@ -57,23 +72,6 @@ func PasswordAuth(password string) func(challenge []byte, digest string) ([]byte
 func computeAuthHash(password string, challenge []byte, digest string) ([]byte, error) {
 	// TODO implement md4, md5, and any other digests rsync supports
 	return nil, fmt.Errorf("auth digest %q not yet implemented", digest)
-}
-
-// Client configures a connection to an rsync daemon module.
-type Client struct {
-	cfg ClientConfig
-}
-
-// NewClient creates a new rsync client with the given configuration.
-func NewClient(cfg ClientConfig) *Client {
-	if cfg.Greeting.Version == 0 {
-		cfg.Greeting.Version = 32
-		cfg.Greeting.SubProtocol = 0
-	}
-	if len(cfg.Greeting.Digests) == 0 {
-		cfg.Greeting.Digests = []string{"md5", "md4"}
-	}
-	return &Client{cfg: cfg}
 }
 
 // Session holds an active connection to an rsync daemon, ready for FS operations.
@@ -99,12 +97,26 @@ type moduleInfo struct {
 
 // Connect runs the full handshake with the server and returns an active session.
 // The rw parameter is the underlying connection (e.g. a TCP socket or pipe).
+// If rw is nil and ConnectFunc is set, ConnectFunc is called with the configured module name to create the connection automatically.
 //
 // In root mode (Module == ""), use [Client.OpenRoot] instead -- the server closes the connection after #list, so a single persistent connection is not possible.
 func (c *Client) Connect(rw io.ReadWriter) (*Session, error) {
-	if c.cfg.Module == "" {
+	if c.Module == "" {
 		return nil, fmt.Errorf("root mode requires OpenRoot, not Connect (server closes connection after #list)")
 	}
+
+	if rw == nil {
+		if c.ConnectFunc == nil {
+			return nil, fmt.Errorf("Connect called with nil io.ReadWriter but ConnectFunc is not set")
+		}
+		var err error
+		rw, err = c.ConnectFunc(c.Module)
+		if err != nil {
+			return nil, fmt.Errorf("ConnectFunc: %w", err)
+		}
+	}
+
+	c.applyDefaults()
 
 	// --- Phase 1: Greeting Exchange ---
 
@@ -120,11 +132,11 @@ func (c *Client) Connect(rw io.ReadWriter) (*Session, error) {
 	}
 
 	// send our greeting
-	if _, err := rw.Write([]byte(c.cfg.Greeting.String())); err != nil {
+	if _, err := rw.Write([]byte(c.Greeting.String())); err != nil {
 		return nil, fmt.Errorf("send client greeting: %w", err)
 	}
 
-	version, _, digest, err := protocol.Negotiate(c.cfg.Greeting, *serverGreeting)
+	version, _, digest, err := protocol.Negotiate(c.Greeting, *serverGreeting)
 	if err != nil {
 		return nil, fmt.Errorf("negotiate version: %w", err)
 	}
@@ -134,12 +146,12 @@ func (c *Client) Connect(rw io.ReadWriter) (*Session, error) {
 		rw:         rw,
 		version:    version,
 		digest:     digest,
-		moduleName: c.cfg.Module,
+		moduleName: c.Module,
 	}
 
 	// --- Phase 2: Module Selection ---
 
-	if _, err := rw.Write([]byte(c.cfg.Module + "\n")); err != nil {
+	if _, err := rw.Write([]byte(c.Module + "\n")); err != nil {
 		return nil, fmt.Errorf("send module request: %w", err)
 	}
 
@@ -157,7 +169,7 @@ func (c *Client) Connect(rw io.ReadWriter) (*Session, error) {
 	lineStr := string(bytes.TrimSpace(authLine))
 	if strings.HasPrefix(lineStr, "@RSYNCD: AUTHREQD ") {
 		// server wants authentication
-		if c.cfg.AuthUser == "" || c.cfg.AuthResponse == nil {
+		if c.AuthUser == "" || c.AuthResponse == nil {
 			return nil, fmt.Errorf("server requires authentication but no credentials provided")
 		}
 
@@ -167,13 +179,13 @@ func (c *Client) Connect(rw io.ReadWriter) (*Session, error) {
 			return nil, fmt.Errorf("decode auth challenge: %w", err)
 		}
 
-		responseHash, err := c.cfg.AuthResponse(challenge, digest)
+		responseHash, err := c.AuthResponse(challenge, digest)
 		if err != nil {
 			return nil, fmt.Errorf("compute auth response: %w", err)
 		}
 
 		responseB64 := base64.StdEncoding.EncodeToString(responseHash)
-		respLine := fmt.Sprintf("%s %s\n", c.cfg.AuthUser, responseB64)
+		respLine := fmt.Sprintf("%s %s\n", c.AuthUser, responseB64)
 		if _, err := rw.Write([]byte(respLine)); err != nil {
 			return nil, fmt.Errorf("send auth response: %w", err)
 		}
@@ -232,16 +244,18 @@ func (c *Client) Connect(rw io.ReadWriter) (*Session, error) {
 
 // OpenRoot returns a Session configured for root mode.
 // Unlike [Client.Connect], this does not establish a live connection.
-// Instead, the Session holds the client config and uses ClientConfig.ConnectFunc to create fresh connections for each FS operation.
+// Instead, the Session holds the client config and uses ConnectFunc to create fresh connections for each FS operation.
 //
 // The server closes the connection after #list, so root mode cannot use a single persistent connection. Each ls at the root and each module access gets its own connection.
 func (c *Client) OpenRoot() (*Session, error) {
-	if c.cfg.Module != "" {
-		return nil, fmt.Errorf("OpenRoot requires Module == \"\", got %q -- use Connect instead", c.cfg.Module)
+	if c.Module != "" {
+		return nil, fmt.Errorf("OpenRoot requires Module == \"\", got %q -- use Connect instead", c.Module)
 	}
-	if c.cfg.ConnectFunc == nil {
-		return nil, fmt.Errorf("root mode requires ConnectFunc in ClientConfig")
+	if c.ConnectFunc == nil {
+		return nil, fmt.Errorf("root mode requires ConnectFunc")
 	}
+
+	c.applyDefaults()
 
 	// do a greeting exchange to negotiate version/digest, then close the connection
 	// this gives us the negotiated params without holding a live connection
@@ -251,9 +265,9 @@ func (c *Client) OpenRoot() (*Session, error) {
 
 	return &Session{
 		client:      c,
-		version:     c.cfg.Greeting.Version,
-		digest:      c.cfg.Greeting.Digests[0],
-		connectFunc: c.cfg.ConnectFunc,
+		version:     c.Greeting.Version,
+		digest:      c.Greeting.Digests[0],
+		connectFunc: c.ConnectFunc,
 	}, nil
 }
 
@@ -363,7 +377,7 @@ func (s *Session) Open(name string) (fs.File, error) {
 func (s *Session) openRootMode(name string) (fs.File, error) {
 	if name == "." || name == "/" {
 		// do a live #list to get current modules
-		modules, err := doListRequest(s.connectFunc, s.client.cfg.Greeting)
+		modules, err := doListRequest(s.connectFunc, s.client.Greeting)
 		if err != nil {
 			return nil, fmt.Errorf("list modules: %w", err)
 		}

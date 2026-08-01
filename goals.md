@@ -49,10 +49,14 @@ Authentication and access control are **optional features provided via callbacks
 
 ### Client Side
 
+`Client` is a plain config struct -- construct directly with `&Client{...}`. Zero-value fields use sensible defaults applied lazily during `Connect()` or `OpenRoot()`.
+
 It should be possible to:
 
 1. Specify a specific module name (the common case -- connect to one module)
 2. Use "root" mode where modules become top-level directories and any of them can be browsed from the same `FS` instance
+
+`Client.Connect()` accepts an `io.ReadWriter` for the connection. If `rw` is nil and `ConnectFunc` is set, `ConnectFunc` is called with the configured module name to create the connection automatically.
 
 In root mode, there should be some way to present each module's "comment" value inside the filesystem representation. Exact shape is TBD (the filesystem doesn't have great places for freeform metadata) -- possibilities include a filename that cannot be a valid module name like `<module>\t<comment>` (matching the `#list` protocol itself, sorting correctly in `ls`), or a virtual file at the root, etc.
 

@@ -232,26 +232,38 @@ func sendFile(w *mux.Writer, f fs.File, version int) error
 
 ```go
 type Client struct {
-	// config for connecting to a specific module or root mode
+	Module       string  // module name ("" for root mode)
+	Greeting     protocol.Greeting
+	AuthUser     string
+	AuthResponse func(challenge []byte, digest string) ([]byte, error)
+	ConnectFunc  func(moduleName string) (io.ReadWriter, error)
 }
 
-func NewClient(opts ...ClientOption) *Client
+// construct directly: &Client{Module: "mymod", ...}
+// zero-value fields use defaults applied lazily in Connect/OpenRoot
 
 // Connect runs the handshake and returns an active session ready for FS operations.
+// If rw is nil and ConnectFunc is set, ConnectFunc creates the connection.
 func (c *Client) Connect(rw io.ReadWriter) (*Session, error)
 
+// OpenRoot returns a Session for root mode (modules as top-level dirs).
+func (c *Client) OpenRoot() (*Session, error)
+
 type Session struct {
-	client  *Client
-	rw      io.ReadWriter
-	version int
-	// ... mux readers/writers derived from rw
+	client      *Client
+	rw          io.ReadWriter
+	version     int
+	digest      string
+	moduleName  string
+	connectFunc func(string) (io.ReadWriter, error) // nil except in root mode
 }
 ```
 
 **Key Details:**
 
-- Client implements `io/fs.FS` interface to present remote filesystem as local
-- Session holds connection state and provides access to the fs.FS implementation
+- `Client` is a plain config struct -- no constructor, no separate ClientConfig type
+- `Session` (not `Client`) implements `io/fs.FS` to present remote filesystem as local
+- `Connect()` accepts nil `rw` when `ConnectFunc` is set -- creates the connection automatically
 - **Root mode is NOT part of Task 8.** The `#list` protocol call closes the server connection (verified against upstream), so root mode cannot use a single persistent connection. It requires a separate rearchitecture (see Task 9).
 
 **Tests:**
@@ -259,6 +271,8 @@ type Session struct {
 - Client connects to our Server (Task 5) through `io.Pipe()` -- full handshake round-trip
 - Version negotiation works correctly in both directions
 - Module listing via client returns expected results
+- `Connect(nil)` with `ConnectFunc` creates connection automatically
+- `Connect(nil)` without `ConnectFunc` returns error
 
 ### Task 9 -- Client: `Open` implementation + root mode rearchitecture (`client-open.go`)
 

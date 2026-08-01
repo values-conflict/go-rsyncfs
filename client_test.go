@@ -49,7 +49,7 @@ func TestClientConnect_BasicSuccess(t *testing.T) {
 	}
 	defer conn.Close()
 
-	client := NewClient(ClientConfig{Module: "testmod"})
+	client := &Client{Module: "testmod"}
 	session, err := client.Connect(conn)
 	if err != nil {
 		t.Fatalf("Connect failed: %v", err)
@@ -113,14 +113,14 @@ func TestClientConnect_VersionNegotiation(t *testing.T) {
 			}
 			defer conn.Close()
 
-			client := NewClient(ClientConfig{
+			client := &Client{
 				Module: "testmod",
 				Greeting: protocol.Greeting{
 					Version:     tt.clientVer,
 					SubProtocol: 0,
 					Digests:     []string{"md5"},
 				},
-			})
+			}
 			session, err := client.Connect(conn)
 			if err != nil {
 				t.Fatalf("Connect failed: %v", err)
@@ -164,11 +164,11 @@ func TestClientConnect_ModuleList(t *testing.T) {
 	}()
 
 	// root mode client -- uses OpenRoot with ConnectFunc
-	client := NewClient(ClientConfig{
+	client := &Client{
 		ConnectFunc: func(moduleName string) (io.ReadWriter, error) {
 			return net.Dial("tcp", ln.Addr().String())
 		},
-	})
+	}
 
 	session, err := client.OpenRoot()
 	if err != nil {
@@ -251,7 +251,7 @@ func TestClientConnect_UnknownModule(t *testing.T) {
 	}
 	defer conn.Close()
 
-	client := NewClient(ClientConfig{Module: "nonexistent"})
+	client := &Client{Module: "nonexistent"}
 	_, err = client.Connect(conn)
 	if err == nil {
 		t.Fatal("expected error for unknown module, got nil")
@@ -298,7 +298,7 @@ func TestClientConnect_AuthRequired(t *testing.T) {
 	defer conn.Close()
 
 	// client without auth should fail
-	client := NewClient(ClientConfig{Module: "testmod"})
+	client := &Client{Module: "testmod"}
 	_, err = client.Connect(conn)
 	if err == nil {
 		t.Fatal("expected error when server requires auth but client has no credentials")
@@ -348,14 +348,14 @@ func TestClientConnect_ProtocolVersionExchange(t *testing.T) {
 	}
 	defer conn.Close()
 
-	client := NewClient(ClientConfig{
+	client := &Client{
 		Module: "testmod",
 		Greeting: protocol.Greeting{
 			Version:     30,
 			SubProtocol: 0,
 			Digests:     []string{"md5"},
 		},
-	})
+	}
 	session, err := client.Connect(conn)
 	if err != nil {
 		t.Fatalf("Connect failed: %v", err)
@@ -365,6 +365,96 @@ func TestClientConnect_ProtocolVersionExchange(t *testing.T) {
 	}
 	if err := <-srvErr; err != nil {
 		t.Fatalf("server error: %v", err)
+	}
+}
+
+func TestClientConnect_NilRWWithConnectFunc(t *testing.T) {
+	mod := &ServerModule{
+		Name: "testmod",
+		FS:   fstest.MapFS{},
+	}
+	srv, _ := NewServer(mod)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	srvErr := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			srvErr <- err
+			return
+		}
+		defer conn.Close()
+		_, err = srv.HandleConnection(conn, HandleOptions{
+			LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
+		})
+		srvErr <- err
+	}()
+
+	client := &Client{
+		Module: "testmod",
+		ConnectFunc: func(moduleName string) (io.ReadWriter, error) {
+			return net.Dial("tcp", ln.Addr().String())
+		},
+	}
+
+	// pass nil -- ConnectFunc should create the connection
+	session, err := client.Connect(nil)
+	if err != nil {
+		t.Fatalf("Connect(nil) failed: %v", err)
+	}
+	if session.version != 32 {
+		t.Errorf("expected version 32, got %d", session.version)
+	}
+	if err := <-srvErr; err != nil {
+		t.Fatalf("server error: %v", err)
+	}
+}
+
+func TestClientConnect_NilRWWithoutConnectFunc(t *testing.T) {
+	client := &Client{Module: "testmod"}
+	_, err := client.Connect(nil)
+	if err == nil {
+		t.Fatal("expected error when rw is nil and ConnectFunc is not set")
+	}
+}
+
+func TestClientConnect_Defaults(t *testing.T) {
+	client := &Client{Module: "testmod"}
+	// defaults are applied lazily in Connect -- verify by checking the greeting
+	// we can't call Connect without a server, so test applyDefaults directly
+	client.applyDefaults()
+	if client.Greeting.Version != 32 {
+		t.Errorf("expected default version 32, got %d", client.Greeting.Version)
+	}
+	if len(client.Greeting.Digests) == 0 {
+		t.Error("expected default digests to be set")
+	}
+}
+
+func TestClientConnect_Options(t *testing.T) {
+	client := &Client{
+		Module:       "mymod",
+		AuthUser:     "alice",
+		AuthResponse: func(challenge []byte, digest string) ([]byte, error) { return []byte("hash"), nil },
+		Greeting:     protocol.Greeting{Version: 28, SubProtocol: 0, Digests: []string{"md4"}},
+	}
+
+	if client.Module != "mymod" {
+		t.Errorf("expected module mymod, got %q", client.Module)
+	}
+	if client.AuthUser != "alice" {
+		t.Errorf("expected AuthUser alice, got %q", client.AuthUser)
+	}
+	if client.AuthResponse == nil {
+		t.Error("expected AuthResponse to be set")
+	}
+	if client.Greeting.Version != 28 {
+		t.Errorf("expected version 28, got %d", client.Greeting.Version)
 	}
 }
 
@@ -459,14 +549,14 @@ func TestClientConnect_LegacyProtocol(t *testing.T) {
 	}
 	defer conn.Close()
 
-	client := NewClient(ClientConfig{
+	client := &Client{
 		Module: "testmod",
 		Greeting: protocol.Greeting{
 			Version:     28,
 			SubProtocol: 0,
 			Digests:     []string{"md4"},
 		},
-	})
+	}
 	session, err := client.Connect(conn)
 	if err != nil {
 		t.Fatalf("Connect failed: %v", err)
@@ -479,38 +569,6 @@ func TestClientConnect_LegacyProtocol(t *testing.T) {
 	}
 	if err := <-srvErr; err != nil {
 		t.Fatalf("server error: %v", err)
-	}
-}
-
-func TestNewClient_Defaults(t *testing.T) {
-	client := NewClient(ClientConfig{})
-	if client.cfg.Greeting.Version != 32 {
-		t.Errorf("expected default version 32, got %d", client.cfg.Greeting.Version)
-	}
-	if len(client.cfg.Greeting.Digests) == 0 {
-		t.Error("expected default digests to be set")
-	}
-}
-
-func TestNewClient_Options(t *testing.T) {
-	client := NewClient(ClientConfig{
-		Module:       "mymod",
-		AuthUser:     "alice",
-		AuthResponse: func(challenge []byte, digest string) ([]byte, error) { return []byte("hash"), nil },
-		Greeting:     protocol.Greeting{Version: 28, SubProtocol: 0, Digests: []string{"md4"}},
-	})
-
-	if client.cfg.Module != "mymod" {
-		t.Errorf("expected module mymod, got %q", client.cfg.Module)
-	}
-	if client.cfg.AuthUser != "alice" {
-		t.Errorf("expected AuthUser alice, got %q", client.cfg.AuthUser)
-	}
-	if client.cfg.AuthResponse == nil {
-		t.Error("expected AuthResponse to be set")
-	}
-	if client.cfg.Greeting.Version != 28 {
-		t.Errorf("expected version 28, got %d", client.cfg.Greeting.Version)
 	}
 }
 
@@ -547,7 +605,7 @@ func TestClientSession_OpenModule_NotImplemented(t *testing.T) {
 	}
 	defer conn.Close()
 
-	client := NewClient(ClientConfig{Module: "testmod"})
+	client := &Client{Module: "testmod"}
 	session, err := client.Connect(conn)
 	if err != nil {
 		t.Fatalf("Connect failed: %v", err)
@@ -590,11 +648,11 @@ func TestClientSession_OpenRootMode_NotImplemented(t *testing.T) {
 		}
 	}()
 
-	client := NewClient(ClientConfig{
+	client := &Client{
 		ConnectFunc: func(moduleName string) (io.ReadWriter, error) {
 			return net.Dial("tcp", ln.Addr().String())
 		},
-	})
+	}
 	session, err := client.OpenRoot()
 	if err != nil {
 		t.Fatalf("OpenRoot failed: %v", err)
