@@ -4,8 +4,6 @@ This document covers code style, design philosophy, testing, and idiomatic patte
 
 This document is intentionally project-generic so it can be reused across Go projects.  Keep examples and terminology generic -- domain-specific concepts belong in project-specific docs, not here.
 
----
-
 ## Philosophy
 
 Go is opinionated by design.  Fighting the language costs more than it saves.  When something feels awkward in Go -- wrapping every return in a result type, adding a base class, injecting a logger into every struct -- that friction is usually a signal to reconsider the approach, not to push through.
@@ -13,8 +11,6 @@ Go is opinionated by design.  Fighting the language costs more than it saves.  W
 **Simple over clever.** Code is read far more than it is written.  A boring solution that a newcomer can read in 30 seconds beats a sophisticated one that requires context to understand.
 
 **Explicit over implicit.** Go has no magic.  No annotations that wire things together at runtime, no hidden inheritance chains, no framework lifecycle hooks.  When something happens, you can see it in the call stack.
-
----
 
 ## Code Style
 
@@ -57,8 +53,6 @@ data = data[1:]
 ```
 
 Exported identifiers need doc comments (`// TypeName ...` or `// FuncName ...`). Unexported identifiers only need comments when the logic is subtle.
-
----
 
 ## Design Principles
 
@@ -311,8 +305,6 @@ func (f *Fetcher) Fetch(ctx context.Context, url string) ([]byte, error)
 
 Prefer channels for ownership transfer and `sync.Mutex` for shared state protection.  Do not use channels as a substitute for mutexes on shared data.
 
----
-
 ## Testing
 
 ### Test structure
@@ -380,8 +372,6 @@ Benchmarks live in `_test.go` files alongside unit tests.  Use them when you hav
 
 Coverage is a floor, not a ceiling.  80% coverage with meaningful tests is better than 100% coverage with tests that only exercise the happy path.  Do not write tests solely to hit a coverage number.
 
----
-
 ## Idiomatic Patterns
 
 ### The "comma ok" idiom
@@ -439,8 +429,6 @@ A nil slice and an empty slice are different in a `== nil` check but identical f
 
 Do not modify a slice or map while ranging over it.  Collect keys/indices to modify first, then apply changes.
 
----
-
 ## Common Mistakes (for humans and LLMs)
 
 ### Over-abstracting early
@@ -490,8 +478,6 @@ if err == ErrNotFound { ... }
 if errors.Is(err, ErrNotFound) { ... }
 ```
 
----
-
 ## Module and Dependency Management
 
 Keep the dependency list short.  Every dependency is code you did not write and cannot fully control.  Before adding a package, ask whether the standard library already covers the use case.
@@ -501,8 +487,6 @@ Pin to a specific version in `go.mod`.  Do not use pseudo-versions (`v0.0.0-2023
 Run `go mod tidy` before committing.  An untidy `go.mod`/`go.sum` means the module graph is stale.
 
 Do not vendor dependencies unless the build environment requires it (air-gapped CI, specific reproducibility requirements).  In most cases `go.sum` provides sufficient reproducibility.
-
----
 
 ## Build System
 
@@ -551,8 +535,6 @@ package sys
 
 The modern syntax (`//go:build`) is preferred over the old `// +build` form.  `gofmt` will add or update the constraint automatically since Go 1.17.
 
----
-
 ## Documentation
 
 Write `go doc`-compatible comments for all exported symbols.  The convention:
@@ -570,8 +552,6 @@ func (c *Client) Fetch(ctx context.Context, path string) ([]byte, error) { ... }
 The first sentence of a doc comment is used as the summary in `go doc` output.  Make it a complete sentence that can stand alone.
 
 Package-level doc comments go in a file named `doc.go` (if the package is large) or above the `package` declaration in the main file.  They describe the package's purpose and the main entry points.
-
----
 
 ## Notes for LLM Assistants
 

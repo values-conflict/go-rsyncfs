@@ -1,6 +1,6 @@
 # Implementation Plan
 
-Each task below is designed to be implementable and testable in a single focused session (~30-60 min). Tasks build incrementally; earlier tasks unblock later ones.
+Each task below is designed to be implementable and testable in a single focused session (~30-60 min).  Tasks build incrementally; earlier tasks unblock later ones.
 
 As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N -- do some stuff` -> `### ~~Task N -- do some stuff~~`; `## Phase N: do stuff` -> `## ~~Phase N: do stuff~~`).
 
@@ -8,7 +8,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 ### ~~Task 1 -- Multiplexed I/O layer (`protocol/mux/`)~~
 
-**Goal:** Implement the binary multiplexed framing protocol as a standalone sub-package. This is genuinely reusable (any rsync implementation needs it) and cleanly separable from Client/Server logic.
+**Goal:** Implement the binary multiplexed framing protocol as a standalone sub-package.  This is genuinely reusable (any rsync implementation needs it) and cleanly separable from Client/Server logic.
 
 **Files:** `protocol/mux/mux.go`, `protocol/mux/mux_test.go`
 
@@ -29,7 +29,7 @@ func (r *Reader) ReadMsg() (code uint8, payload []byte, err error)
 
 **Key details:**
 
-- Frame header: `((MPLEX_BASE + msgCode) << 24) | length` where MPLEX_BASE=7. Written as a **little-endian** uint32 on the wire (confirmed from upstream source via `SIVAL()` in `byteorder.h`).
+- Frame header: `((MPLEX_BASE + msgCode) << 24) | length` where MPLEX_BASE=7.  Written as a **little-endian** uint32 on the wire (confirmed from upstream source via `SIVAL()` in `byteorder.h`).
 - Payload length in bits 23-0 (max ~16MB frames)
 - Message codes defined as constants matching upstream `enum msgcode`
 
@@ -65,7 +65,7 @@ func ReadVarlong(r io.Reader, minBytes byte) (int64, error)
 
 - Round-trip all values across the full range of each encoding
 - Verify wire format matches upstream source code exactly
-- Cross-check: varint(0), varint(-1), varint(max-int32), etc. produce expected byte sequences
+- Cross-check: varint(0), varint(-1), varint(max-int32), etc produce expected byte sequences
 - Error handling for malformed encoded data
 
 ### ~~Task 3 -- Greeting exchange (`protocol/greet.go`)~~
@@ -101,7 +101,7 @@ func Negotiate(local, remote Greeting) (version int, subProtocol byte, digest st
 
 ### ~~Task 4 -- Server struct & `@ERROR` handling (`server.go`)~~
 
-**Goal:** Define the `Server` type and implement error response formatting. This establishes the server's basic shape before any protocol logic.
+**Goal:** Define the `Server` type and implement error response formatting.  This establishes the server's basic shape before any protocol logic.
 
 **Files:** `server.go`, `server_test.go`
 
@@ -138,7 +138,7 @@ func NewServer(mods ...*ServerModule) (*Server, error)
 
 ### ~~Task 5 -- Server: full handshake (`server-handshake.go`)~~
 
-**Goal:** Implement the server-side connection handshake: greeting exchange → module selection → auth (if configured) → argument parsing. Returns control to caller when ready for data transfer, or an error at any point.
+**Goal:** Implement the server-side connection handshake: greeting exchange → module selection → auth (if configured) → argument parsing.  Returns control to caller when ready for data transfer, or an error at any point.
 
 **Files:** `server-handshake.go`, `server-handshake_test.go`
 
@@ -170,7 +170,7 @@ type HandleOptions struct {
 
 ### ~~Task 6 -- Server: file list generation (`server-flist.go`)~~
 
-**Goal:** Walk the backing FS and emit a file list in rsync wire format. This is the server-side equivalent of `send_files()` for the listing phase.
+**Goal:** Walk the backing FS and emit a file list in rsync wire format.  This is the server-side equivalent of `send_files()` for the listing phase.
 
 **Files:** `server-flist.go`, `server-flist_test.go`
 
@@ -196,7 +196,7 @@ func sendFileList(w *mux.Writer, rootFS fs.FS, basePath string, version int) err
 
 ### ~~Task 7 -- Server: file data transfer (`server-transfer.go`)~~
 
-**Goal:** Implement the server-side data sender: given a file, compute block checksums and handle delta requests from the client. This is the core of rsync's efficient transfer algorithm.
+**Goal:** Implement the server-side data sender: given a file, compute block checksums and handle delta requests from the client.  This is the core of rsync's efficient transfer algorithm.
 
 **Files:** `server-transfer.go`, `server-transfer_test.go`
 
@@ -214,8 +214,7 @@ func sendFile(r *mux.Reader, w *mux.Writer, f fs.File, version int) error
 - Send rolling checksums (sum1 = Adler-like, sum2 = MD4/MD5 depending on negotiated digest)
 - Read delta map from client and transmit only mismatched blocks
 - Send `MSG_SUCCESS` with file index when done
-- **Role:** In this read-only FS context, the server acts as the *Sender* in rsync's terminology (providing data to a receiver).
-- **Role:** In this read-only FS context, the server acts as the *Sender* in rsync's terminology (providing data to a receiver). The `r *mux.Reader` parameter is required because the server must read the delta stream from the client to know which blocks to send
+- **Role:** In this read-only FS context, the server acts as the *Sender* in rsync's terminology (providing data to a receiver).  The `r *mux.Reader` parameter is required because the server must read the delta stream from the client to know which blocks to send
 
 **Tests:**
 
@@ -228,7 +227,7 @@ func sendFile(r *mux.Reader, w *mux.Writer, f fs.File, version int) error
 
 ### ~~Task 8 -- Client struct & connection setup (`client.go`)~~
 
-**Goal:** Define the `Client` type and implement connection establishment + handshake from the client side. This mirrors Task 5 but in reverse direction.
+**Goal:** Define the `Client` type and implement connection establishment + handshake from the client side.  This mirrors Task 5 but in reverse direction.
 
 **Files:** `client.go`, `client_test.go`
 
@@ -276,8 +275,8 @@ type Session struct {
 - `Connect()` accepts nil `rw` when `ConnectFunc` is set -- creates the connection automatically
 - `Connect` uses a **value receiver** (not pointer) since `Client` is an immutable config struct
 - **`PasswordAuth` helper:** convenience function that returns an `AuthResponse` for standard password+challenge digest flow
-- **`computeAuthHash` is a TODO:** the actual hash computation (md4, md5, etc.) is not yet implemented -- returns an error for now
-- **Root mode is NOT part of Task 8.** The `#list` protocol call closes the server connection (verified against upstream), so root mode cannot use a single persistent connection. It requires a separate approach (see Task 9).
+- **`computeAuthHash` is a TODO:** the actual hash computation (md4, md5, etc) is not yet implemented -- returns an error for now
+- **Root mode is NOT part of Task 8.**  The `#list` protocol call closes the server connection (verified against upstream), so root mode cannot use a single persistent connection.  It requires a separate approach (see Task 9).
 
 **Tests:**
 
@@ -289,7 +288,7 @@ type Session struct {
 
 ### ~~Task 9 -- Client: `Open` implementation + root mode (`client-open.go`)~~
 
-**Goal:** Implement `fs.FS.Open` for the client side. Opening a file triggers the server-side data transfer protocol (Tasks 6 + 7). Also rearchitect root mode to handle the fact that `#list` closes the connection.
+**Goal:** Implement `fs.FS.Open` for the client side.  Opening a file triggers the server-side data transfer protocol (Tasks 6 + 7).  Also rearchitect root mode to handle the fact that `#list` closes the connection.
 
 **Files:** `client-open.go`, `client-open_test.go`
 
@@ -307,8 +306,8 @@ func (s *Session) Open(name string) (fs.File, error)
 - The returned `fs.File` implements both `Read()` (for regular files) and `Readdir()` (for directories)
 - Symlinks are handled by returning appropriate Mode() flags with target information when available
 - **Metadata Mapping:** Map rsync wire-format modes and permissions back to Go `os.FileMode`
-- **Root mode:** Since `#list` closes the server connection (verified against upstream), root mode cannot use a single persistent connection. `Session` in root mode acts as a config holder (connection params, not a live socket). `ReadDir` on root opens a fresh connection, sends `#list`, reads modules, and closes. `Open` on a module path opens a fresh connection to that specific module. Each FS operation gets its own connection.
-- **`OpenRoot` skips greeting probe (TODO):** `OpenRoot` uses configured defaults for version/digest without doing a live greeting exchange. A proper implementation would open a connection, do greeting exchange, then close.
+- **Root mode:** Since `#list` closes the server connection (verified against upstream), root mode cannot use a single persistent connection.  `Session` in root mode acts as a config holder (connection params, not a live socket).  `ReadDir` on root opens a fresh connection, sends `#list`, reads modules, and closes.  `Open` on a module path opens a fresh connection to that specific module.  Each FS operation gets its own connection.
+- **`OpenRoot` skips greeting probe (TODO):** `OpenRoot` uses configured defaults for version/digest without doing a live greeting exchange.  A proper implementation would open a connection, do greeting exchange, then close.
 - **Flist reader only supports basic byte xflags (TODO):** The client-side flist reader (`flistReader.readXflags`) does not support varint xflags when `CF_VARINT_FLIST_FLAGS` is negotiated.
 
 **Tests:**
@@ -322,7 +321,7 @@ func (s *Session) Open(name string) (fs.File, error)
 
 ### Task 10 -- Cross-implementation tests (`cross_test.go`)
 
-**Goal:** Integration tests connecting Client directly to Server through `io.Pipe()` with embedded test fixtures. Run `testing/fstest.TestFS` as additional validation.
+**Goal:** Integration tests connecting Client directly to Server through `io.Pipe()` with embedded test fixtures.  Run `testing/fstest.TestFS` as additional validation.
 
 **Files:** `cross_test.go`, plus any fixture files under `testdata/`
 
@@ -338,7 +337,7 @@ func (s *Session) Open(name string) (fs.File, error)
 
 ### Task 11 -- Upstream rsync integration tests (`integration_test.go`)
 
-**Goal:** Tests that connect our library to the real `rsync` binary. Skipped with `-short` or when `rsync` is not found.
+**Goal:** Tests that connect our library to the real `rsync` binary.  Skipped with `-short` or when `rsync` is not found.
 
 **Files:** `integration_test.go`
 
@@ -352,11 +351,11 @@ func (s *Session) Open(name string) (fs.File, error)
 - Our Server behind a stream, driven by real `rsync` client binary
 - Verify transfers work correctly in both directions (pull from server)
 
-**Process management:** All started rsync processes must be killed on test completion. No orphans.
+**Process management:** All started rsync processes must be killed on test completion.  No orphans.
 
 ### Task 12 -- Protocol version coverage (`version_test.go`)
 
-**Goal:** Systematic tests across the supported protocol version range (20-32). Verify that negotiation, encoding differences, and feature gates work correctly per version.
+**Goal:** Systematic tests across the supported protocol version range (20-32).  Verify that negotiation, encoding differences, and feature gates work correctly per version.
 
 **Files:** `version_test.go`
 
@@ -421,8 +420,8 @@ func (s *Session) Open(name string) (fs.File, error)
 These are features that are partially implemented or stubbed but not yet functional:
 
 - **Auth hash computation:** `computeAuthHash()` in `client.go` returns an error (TODO). Authentication cannot actually succeed until md4/md5 digest computation is implemented.
-- **Compat flags negotiation:** The `-e` option mechanism for negotiating `CF_VARINT_FLIST_FLAGS` and other compat flags is not implemented. `sendFileList` accepts a `varintFlistFlags` parameter but it is always `false`. Client-side flist reader does not support varint xflags.
-- **Root mode greeting probe:** `OpenRoot()` skips the greeting exchange and uses configured defaults for version/digest. A proper implementation would do a live greeting exchange.
+- **Compat flags negotiation:** The `-e` option mechanism for negotiating `CF_VARINT_FLIST_FLAGS` and other compat flags is not implemented.  `sendFileList` accepts a `varintFlistFlags` parameter but it is always `false`.  Client-side flist reader does not support varint xflags.
+- **Root mode greeting probe:** `OpenRoot()` skips the greeting exchange and uses configured defaults for version/digest.  A proper implementation would do a live greeting exchange.
 
 ## Future Phases (not yet planned into tasks)
 

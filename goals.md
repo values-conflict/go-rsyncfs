@@ -16,13 +16,13 @@ Both implementations should be library-first: no CLI, no TCP handling, no encryp
 
 ## Transport Model
 
-Neither implementation handles transport directly. The caller is responsible for:
+Neither implementation handles transport directly.  The caller is responsible for:
 
 - TCP connection management (accepting/listening or dialing)
-- Encryption (TLS, SSH tunneling, etc.)
+- Encryption (TLS, SSH tunneling, etc)
 - Any framing/proxy protocol handling
 
-The library accepts a single `io.ReadWriter` (or similar stream interface -- TBD during implementation) per operation. This means:
+The library accepts a single `io.ReadWriter` (or similar stream interface -- TBD during implementation) per operation.  This means:
 
 - The "listen" loop for `Server` lives *outside* the library entirely; callers pass in one connection/stream at a time via a clean method call
 - `Client` operations similarly receive a stream from the caller rather than opening sockets themselves
@@ -30,7 +30,7 @@ The library accepts a single `io.ReadWriter` (or similar stream interface -- TBD
 
 ### Reusable Instances
 
-A single `*Client` or `*Server` instance should be reusable across multiple operations. The struct holds configuration state (module selection, protocol version preferences, auth callbacks, etc.) while each operation receives its own stream from the caller. Exact shape of this is TBD during implementation but the invariant is: **construct once, operate many times**.
+A single `*Client` or `*Server` instance should be reusable across multiple operations.  The struct holds configuration state (module selection, protocol version preferences, auth callbacks, etc) while each operation receives its own stream from the caller.  Exact shape of this is TBD during implementation but the invariant is: **construct once, operate many times**.
 
 ## Concurrency Constraints
 
@@ -39,9 +39,9 @@ A single `*Client` or `*Server` instance should be reusable across multiple oper
 
 ## Authentication / Access Control
 
-Authentication and access control are **optional features provided via callbacks** supplied by the user, not implemented natively in the library. This means:
+Authentication and access control are **optional features provided via callbacks** supplied by the user, not implemented natively in the library.  This means:
 
-- `Server` accepts optional callback functions for auth challenges (username/password verification), ACL checks (`hosts allow/deny` equivalent), etc.
+- `Server` accepts optional callback functions for auth challenges (username/password verification), ACL checks (`hosts allow/deny` equivalent), etc
 - A caller implementing a full rsync daemon can wire up `secrets file` parsing and host matching externally
 - If no callbacks are provided, the server operates in open/anonymous mode
 
@@ -56,15 +56,15 @@ It should be possible to:
 1. Specify a specific module name (the common case -- connect to one module)
 2. Use "root" mode where modules become top-level directories and any of them can be browsed from the same `FS` instance
 
-`Client.Connect()` accepts an `io.ReadWriter` for the connection. If `rw` is nil and `ConnectFunc` is set, `ConnectFunc` is called with the configured module name to create the connection automatically.
+`Client.Connect()` accepts an `io.ReadWriter` for the connection.  If `rw` is nil and `ConnectFunc` is set, `ConnectFunc` is called with the configured module name to create the connection automatically.
 
-In root mode, there should be some way to present each module's "comment" value inside the filesystem representation. Exact shape is TBD (the filesystem doesn't have great places for freeform metadata) -- possibilities include a filename that cannot be a valid module name like `<module>\t<comment>` (matching the `#list` protocol itself, sorting correctly in `ls`), or a virtual file at the root, etc.
+In root mode, there should be some way to present each module's "comment" value inside the filesystem representation.  Exact shape is TBD (the filesystem doesn't have great places for freeform metadata) -- possibilities include a filename that cannot be a valid module name like `<module>\t<comment>` (matching the `#list` protocol itself, sorting correctly in `ls`), or a virtual file at the root, etc
 
-**Connection model constraint:** The server closes the connection after `#list` (verified against upstream -- the child process calls `_exit()` immediately after `send_listing()`). This means root mode cannot use a single persistent connection. Each `#list` call (root `ls`) and each module access requires its own dedicated connection. The `Session` in root mode is a config holder, not a live connection.
+**Connection model constraint:** The server closes the connection after `#list` (verified against upstream -- the child process calls `_exit()` immediately after `send_listing()`).  This means root mode cannot use a single persistent connection.  Each `#list` call (root `ls`) and each module access requires its own dedicated connection.  The `Session` in root mode is a config holder, not a live connection.
 
 ### Server Side
 
-A single `Server` instance should accept any number of module-to-`io/fs.FS` mappings. Each module is configured via some kind of `ServerModule` wrapping struct that includes:
+A single `Server` instance should accept any number of module-to-`io/fs.FS` mappings.  Each module is configured via some kind of `ServerModule` wrapping struct that includes:
 
 - Module name
 - The backing `io/fs.FS`
@@ -73,7 +73,7 @@ A single `Server` instance should accept any number of module-to-`io/fs.FS` mapp
 
 ### Config Surface Philosophy
 
-Model the *minimal* amount of rsyncd.conf directives necessary. Prefer callbacks where appropriate; only implement options directly in the library when we genuinely have to. Examples:
+Model the *minimal* amount of rsyncd.conf directives necessary.  Prefer callbacks where appropriate; only implement options directly in the library when we genuinely have to.  Examples:
 
 - `read only` -- direct option on ServerModule (maps cleanly to FS writability state)
 - `auth users` / `secrets file` -- callback-based (caller parses secrets files)
@@ -92,7 +92,7 @@ Support everything that `io/fs.FS` already has native interfaces for:
 
 ### Future Phases
 
-Eventually support everything rsync supports: hardlinks, ACLs, xattrs, extended timestamps (nanosecond precision), device files, sockets. This will likely require extending beyond `io/fs.FS` into a custom writable FS interface (see below).
+Eventually support everything rsync supports: hardlinks, ACLs, xattrs, extended timestamps (nanosecond precision), device files, sockets.  This will likely require extending beyond `io/fs.FS` into a custom writable FS interface (see below).
 
 ## Writability / Bidirectional Transfers
 
@@ -101,17 +101,17 @@ Both Client and Server should eventually support bidirectional transfers:
 - **Client as writer**: push files *to* the remote rsync daemon
 - **Server as writer**: accept pushed files from clients
 
-This will require extending `io/fs.FS` with writability. The extended writable FS interface should probably live in a separate module and include an `os.Root` wrapper (or similar). Details TBD during implementation but the goal is clear: both ends eventually read *and* write.
+This will require extending `io/fs.FS` with writability.  The extended writable FS interface should probably live in a separate module and include an `os.Root` wrapper (or similar).  Details TBD during implementation but the goal is clear: both ends eventually read *and* write.
 
 ## Caching / Partial Transfer Support
 
-Caching should be kept to a minimum and optional. The envisioned shape:
+Caching should be kept to a minimum and optional.  The envisioned shape:
 
 - A cache can be provided as something like an `os.Root` that files can be written to (eventually anything implementing our writable FS extension)
 - **Partial transfer**: if we're configured with a cache on either end, *and* that cache has a partial/incomplete transfer of the file being pulled/read, we should utilize it for rsync's delta-transfer algorithm
 - **Cache invalidation**: TBD (size limit? LRU eviction?)
 
-This is explicitly a later-phase goal. The shape of partial transfer support when the primary API is `io/fs.FS`-shaped needs design work. We should have enough notes in code/comments that we don't forget about it, but v1 does not need to implement it.
+This is explicitly a later-phase goal.  The shape of partial transfer support when the primary API is `io/fs.FS`-shaped needs design work.  We should have enough notes in code/comments that we don't forget about it, but v1 does not need to implement it.
 
 ## Compression / Checksums
 
@@ -137,13 +137,13 @@ go-rsyncfs/
   ...                -- further splits as needed during implementation
 ```
 
-The *main* API of the library is the `io/fs.FS` implementations. A dedicated `protocol` sub-package should only be created if it genuinely improves modularity or testability for the wire protocol bits (greeting exchange, multiplexed I/O layer, file list encoding, etc.). If those helpers are simpler inline in the root package, keep them there.
+The *main* API of the library is the `io/fs.FS` implementations.  A dedicated `protocol` sub-package should only be created if it genuinely improves modularity or testability for the wire protocol bits (greeting exchange, multiplexed I/O layer, file list encoding, etc).  If those helpers are simpler inline in the root package, keep them there.
 
 Code should generally be organized into small files as much as is reasonable. If parts of the code make sense as standalone libraries useful to others implementing rsync-related projects (e.g., a generic multiplexed I/O layer library), those belong in separate sub-packages.
 
 ### Third-Party Dependencies
 
-Packages like `github.com/gokrazy/rsync` *can* be considered as dependencies, but only if they truly meet the need and provide primitives necessary to implement a filesystem. Do not add dependencies for convenience alone -- standard library first.
+Packages like `github.com/gokrazy/rsync` *can* be considered as dependencies, but only if they truly meet the need and provide primitives necessary to implement a filesystem.  Do not add dependencies for convenience alone -- standard library first.
 
 When exploring this, that repository's README contains a list of other potential (Go-based) libraries to consider.
 
@@ -151,7 +151,7 @@ When exploring this, that repository's README contains a list of other potential
 
 ### Cross-Implementation Tests (with `go:embed` fixtures)
 
-Test Client connected directly to Server instances using in-memory streams (no network). Use embedded test fixtures (`go:embed`) for file content verification. Run `testing/fstest.TestFS` as an additional validation layer above anything we write ourselves.
+Test Client connected directly to Server instances using in-memory streams (no network).  Use embedded test fixtures (`go:embed`) for file content verification.  Run `testing/fstest.TestFS` as an additional validation layer above anything we write ourselves.
 
 ### Integration Tests Against Upstream `rsync` Binary
 
@@ -162,7 +162,7 @@ Skipped with `go test -short` or when `rsync` binaries are missing:
 
 ### Process Management Requirements
 
-Any test that starts an `rsync` process *must* correctly manage and kill it if the test finishes prematurely or successfully. No orphaned processes.
+Any test that starts an `rsync` process *must* correctly manage and kill it if the test finishes prematurely or successfully.  No orphaned processes.
 
 If there is a way to run `rsync --daemon` without TCP socket/port binding (e.g., via Unix sockets, pipes, or similar), prefer that over real network ports. Investigate how rsync itself accomplishes daemon mode over SSH for inspiration.
 
