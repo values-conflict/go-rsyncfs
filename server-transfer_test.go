@@ -449,13 +449,9 @@ func TestParseDeltaStream_Empty(t *testing.T) {
 	delta := make([]byte, 4)
 	binary.LittleEndian.PutUint32(delta, 0)
 
-	var out bytes.Buffer
 	sh := sumHead{count: 0}
-	if err := parseDeltaStream(delta, &out, sh); err != nil {
+	if err := parseDeltaStream(delta, sh); err != nil {
 		t.Fatalf("parseDeltaStream failed: %v", err)
-	}
-	if out.Len() != 0 {
-		t.Errorf("output len = %d, want 0", out.Len())
 	}
 }
 
@@ -465,14 +461,9 @@ func TestParseDeltaStream_LiteralOnly(t *testing.T) {
 	copy(delta[4:9], []byte("hello"))
 	binary.LittleEndian.PutUint32(delta[9:13], 0)
 
-	var out bytes.Buffer
 	sh := sumHead{count: 0}
-	if err := parseDeltaStream(delta, &out, sh); err != nil {
+	if err := parseDeltaStream(delta, sh); err != nil {
 		t.Fatalf("parseDeltaStream failed: %v", err)
-	}
-	got := out.Bytes()
-	if !bytes.Equal(got, []byte("hello")) {
-		t.Errorf("output = %q, want %q", got, "hello")
 	}
 }
 
@@ -483,14 +474,9 @@ func TestParseDeltaStream_LiteralAndToken(t *testing.T) {
 	binary.LittleEndian.PutUint32(delta[9:13], 0xFFFFFFFF) // token = -1 (block 0)
 	binary.LittleEndian.PutUint32(delta[13:17], 0)
 
-	var out bytes.Buffer
 	sh := sumHead{count: 2, blength: 700}
-	if err := parseDeltaStream(delta, &out, sh); err != nil {
+	if err := parseDeltaStream(delta, sh); err != nil {
 		t.Fatalf("parseDeltaStream failed: %v", err)
-	}
-	got := out.Bytes()
-	if !bytes.Equal(got, []byte("hello")) {
-		t.Errorf("output = %q, want %q", got, "hello")
 	}
 }
 
@@ -503,15 +489,9 @@ func TestParseDeltaStream_MultipleLiterals(t *testing.T) {
 	copy(delta[17:22], []byte("world"))
 	binary.LittleEndian.PutUint32(delta[22:26], 0)
 
-	var out bytes.Buffer
 	sh := sumHead{count: 10, blength: 700}
-	if err := parseDeltaStream(delta, &out, sh); err != nil {
+	if err := parseDeltaStream(delta, sh); err != nil {
 		t.Fatalf("parseDeltaStream failed: %v", err)
-	}
-	got := out.Bytes()
-	want := []byte("helloworld")
-	if !bytes.Equal(got, want) {
-		t.Errorf("output = %q, want %q", got, want)
 	}
 }
 
@@ -520,9 +500,8 @@ func TestParseDeltaStream_InvalidBlockIndex(t *testing.T) {
 	binary.LittleEndian.PutUint32(delta[0:4], 0xFFFFFF9C) // token = -100
 	binary.LittleEndian.PutUint32(delta[4:8], 0)
 
-	var out bytes.Buffer
 	sh := sumHead{count: 2, blength: 700}
-	err := parseDeltaStream(delta, &out, sh)
+	err := parseDeltaStream(delta, sh)
 	if err == nil {
 		t.Error("expected error for invalid block index, got nil")
 	}
@@ -531,9 +510,8 @@ func TestParseDeltaStream_InvalidBlockIndex(t *testing.T) {
 func TestParseDeltaStream_Truncated(t *testing.T) {
 	delta := []byte{0, 0, 0}
 
-	var out bytes.Buffer
 	sh := sumHead{count: 0}
-	err := parseDeltaStream(delta, &out, sh)
+	err := parseDeltaStream(delta, sh)
 	if err == nil {
 		t.Error("expected error for truncated delta, got nil")
 	}
@@ -584,7 +562,7 @@ func TestSendFile_FullRoundTrip(t *testing.T) {
 		f := &fakeFile{data: fileData}
 		r := mux.NewReader(serverConn)
 		w := mux.NewWriter(serverConn)
-		err := sendFile(r, w, f, io.Discard, 30)
+		err := sendFile(r, w, f, 30)
 		if err != nil {
 			t.Logf("sendFile error: %v", err)
 		}
@@ -617,13 +595,34 @@ func TestSendFile_FullRoundTrip(t *testing.T) {
 			return
 		}
 
-		// send delta stream: literal all data + end token
-		deltaLen := len(fileData)
-		delta := make([]byte, 4+deltaLen+4)
-		binary.LittleEndian.PutUint32(delta[0:4], uint32(deltaLen))
-		copy(delta[4:4+deltaLen], fileData)
-		if err := w.WriteMsg(mux.MsgData, delta); err != nil {
+		// send delta stream: token references for all blocks
+		var deltaBuf []byte
+		for i := int32(0); i < count; i++ {
+			token := -(i + 1) // token reference for block i
+			var b [4]byte
+			binary.LittleEndian.PutUint32(b[:], uint32(token))
+			deltaBuf = append(deltaBuf, b[:]...)
+		}
+		// end of stream
+		deltaBuf = append(deltaBuf, 0, 0, 0, 0)
+
+		if err := w.WriteMsg(mux.MsgData, deltaBuf); err != nil {
 			t.Logf("write delta: %v", err)
+			return
+		}
+
+		// read file data
+		code, dataPayload, err := r.ReadMsg()
+		if err != nil {
+			t.Logf("read file data: %v", err)
+			return
+		}
+		if code != mux.MsgData {
+			t.Logf("expected MsgData for file data, got %d", code)
+			return
+		}
+		if !bytes.Equal(dataPayload, fileData) {
+			t.Logf("file data mismatch: got %d bytes, want %d", len(dataPayload), len(fileData))
 			return
 		}
 
@@ -653,7 +652,7 @@ func TestSendFile_ZeroByteFile(t *testing.T) {
 		f := &fakeFile{data: []byte{}}
 		r := mux.NewReader(serverConn)
 		w := mux.NewWriter(serverConn)
-		err := sendFile(r, w, f, io.Discard, 30)
+		err := sendFile(r, w, f, 30)
 		if err != nil {
 			t.Logf("sendFile error: %v", err)
 		}
@@ -686,6 +685,21 @@ func TestSendFile_ZeroByteFile(t *testing.T) {
 			return
 		}
 
+		// read file data (empty)
+		code, dataPayload, err := r.ReadMsg()
+		if err != nil {
+			t.Logf("read file data: %v", err)
+			return
+		}
+		if code != mux.MsgData {
+			t.Logf("expected MsgData for file data, got %d", code)
+			return
+		}
+		if len(dataPayload) != 0 {
+			t.Logf("expected empty file data, got %d bytes", len(dataPayload))
+			return
+		}
+
 		// read file checksum
 		_, _, err = r.ReadMsg()
 		if err != nil {
@@ -715,7 +729,7 @@ func TestSendFile_MultipleProtocols(t *testing.T) {
 				f := &fakeFile{data: fileData}
 				r := mux.NewReader(serverConn)
 				w := mux.NewWriter(serverConn)
-				err := sendFile(r, w, f, io.Discard, version)
+				err := sendFile(r, w, f, version)
 				if err != nil {
 					t.Logf("sendFile(v=%d) error: %v", version, err)
 				}
@@ -756,12 +770,25 @@ func TestSendFile_MultipleProtocols(t *testing.T) {
 					}
 				}
 
-				// send delta
-				delta := make([]byte, 4+len(fileData)+4)
-				binary.LittleEndian.PutUint32(delta[0:4], uint32(len(fileData)))
-				copy(delta[4:4+len(fileData)], fileData)
-				if err := w.WriteMsg(mux.MsgData, delta); err != nil {
+				// send delta: token references for all blocks
+				var deltaBuf []byte
+				for i := int32(0); i < count; i++ {
+					token := -(i + 1)
+					var b [4]byte
+					binary.LittleEndian.PutUint32(b[:], uint32(token))
+					deltaBuf = append(deltaBuf, b[:]...)
+				}
+				deltaBuf = append(deltaBuf, 0, 0, 0, 0)
+
+				if err := w.WriteMsg(mux.MsgData, deltaBuf); err != nil {
 					t.Logf("v=%d write delta: %v", version, err)
+					return
+				}
+
+				// read file data
+				_, _, err = r.ReadMsg()
+				if err != nil {
+					t.Logf("v=%d read file data: %v", version, err)
 					return
 				}
 
@@ -796,7 +823,7 @@ func TestSendFile_LargeFile(t *testing.T) {
 		f := &fakeFile{data: fileData}
 		r := mux.NewReader(serverConn)
 		w := mux.NewWriter(serverConn)
-		err := sendFile(r, w, f, io.Discard, 30)
+		err := sendFile(r, w, f, 30)
 		if err != nil {
 			t.Logf("sendFile error: %v", err)
 		}
@@ -830,12 +857,33 @@ func TestSendFile_LargeFile(t *testing.T) {
 			return
 		}
 
-		// send delta: literal all
-		delta := make([]byte, 4+len(fileData)+4)
-		binary.LittleEndian.PutUint32(delta[0:4], uint32(len(fileData)))
-		copy(delta[4:4+len(fileData)], fileData)
-		if err := w.WriteMsg(mux.MsgData, delta); err != nil {
+		// send delta: token references for all blocks
+		var deltaBuf []byte
+		for i := int32(0); i < count; i++ {
+			token := -(i + 1)
+			var b [4]byte
+			binary.LittleEndian.PutUint32(b[:], uint32(token))
+			deltaBuf = append(deltaBuf, b[:]...)
+		}
+		deltaBuf = append(deltaBuf, 0, 0, 0, 0)
+
+		if err := w.WriteMsg(mux.MsgData, deltaBuf); err != nil {
 			t.Logf("write delta: %v", err)
+			return
+		}
+
+		// read file data
+		code, dataPayload, err := r.ReadMsg()
+		if err != nil {
+			t.Logf("read file data: %v", err)
+			return
+		}
+		if code != mux.MsgData {
+			t.Logf("expected MsgData for file data, got %d", code)
+			return
+		}
+		if !bytes.Equal(dataPayload, fileData) {
+			t.Logf("file data mismatch: got %d bytes, want %d", len(dataPayload), len(fileData))
 			return
 		}
 

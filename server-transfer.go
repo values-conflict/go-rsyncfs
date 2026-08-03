@@ -107,15 +107,16 @@ func checksum2(data []byte, s2length int) []byte {
 
 // sendFile sends one file via the multiplexed I/O layer using rsync's block checksum protocol.
 // The server acts as the sender: it provides block checksums, receives a delta stream from the
-// client, writes the reconstructed file to out, and verifies with a final checksum.
+// client, sends the file data, and verifies with a final checksum.
 //
 // The protocol flow is:
 //  1. Server sends sum_head (block count, block size, etc.) as MSG_DATA
 //  2. Server sends per-block checksums (sum1 + sum2 for each block) as MSG_DATA
-//  3. Client sends delta stream (literal data + token references) as MSG_DATA
-//  4. Server sends file checksum as MSG_DATA
-//  5. Client sends MSG_SUCCESS with file index
-func sendFile(r *mux.Reader, w *mux.Writer, f fs.File, out io.Writer, version int) error {
+//  3. Client sends delta stream (token references for blocks it needs) as MSG_DATA
+//  4. Server sends file data as MSG_DATA
+//  5. Server sends file checksum as MSG_DATA
+//  6. Client sends MSG_SUCCESS with file index
+func sendFile(r *mux.Reader, w *mux.Writer, f fs.File, version int) error {
 	// read the entire file into memory for checksum computation
 	data, err := io.ReadAll(f)
 	if err != nil {
@@ -137,17 +138,25 @@ func sendFile(r *mux.Reader, w *mux.Writer, f fs.File, out io.Writer, version in
 		}
 	}
 
-	// --- step 3: read delta stream from client and write to output ---
-	if err := readDeltaStream(r, out, sh); err != nil {
+	// --- step 3: read delta stream from client ---
+	// the delta stream tells us which blocks the client needs.
+	// for a fresh pull (no local copy), the client sends token references for all blocks.
+	if err := readDeltaStream(r, sh); err != nil {
 		return fmt.Errorf("read delta stream: %w", err)
 	}
 
-	// --- step 4: send file checksum for verification ---
+	// --- step 4: send file data ---
+	// send the full file data as MSG_DATA
+	if err := w.WriteMsg(mux.MsgData, data); err != nil {
+		return fmt.Errorf("send file data: %w", err)
+	}
+
+	// --- step 5: send file checksum for verification ---
 	if err := sendFileChecksum(w, data, int(sh.s2length)); err != nil {
 		return fmt.Errorf("send file checksum: %w", err)
 	}
 
-	// --- step 5: wait for MSG_SUCCESS ---
+	// --- step 6: wait for MSG_SUCCESS ---
 	code, payload, err := r.ReadMsg()
 	if err != nil {
 		return fmt.Errorf("read success msg: %w", err)
@@ -213,14 +222,15 @@ func sendBlockChecksums(w *mux.Writer, data []byte, sh sumHead) error {
 	return w.WriteMsg(mux.MsgData, buf)
 }
 
-// readDeltaStream reads the delta stream from the client and writes the
-// reconstructed file to out.
+// readDeltaStream reads the delta stream from the client.
+// The delta stream tells the server which blocks the client needs.
+// For a fresh pull (no local copy), the client sends token references for all blocks.
 //
 // The delta stream format (non-compressed) is:
 //   - Literal data: int32(len) > 0, followed by len bytes of data
-//   - Token reference: int32(-(blockIndex+1)), means "copy from block blockIndex"
+//   - Token reference: int32(-(blockIndex+1)), means "I need block blockIndex"
 //   - End of stream: int32(0)
-func readDeltaStream(r *mux.Reader, out io.Writer, sh sumHead) error {
+func readDeltaStream(r *mux.Reader, sh sumHead) error {
 	code, payload, err := r.ReadMsg()
 	if err != nil {
 		return fmt.Errorf("read delta msg: %w", err)
@@ -229,11 +239,12 @@ func readDeltaStream(r *mux.Reader, out io.Writer, sh sumHead) error {
 		return fmt.Errorf("expected MSG_DATA for delta, got code %d", code)
 	}
 
-	return parseDeltaStream(payload, out, sh)
+	return parseDeltaStream(payload, sh)
 }
 
-// parseDeltaStream parses the raw delta stream bytes and writes the reconstructed file.
-func parseDeltaStream(data []byte, out io.Writer, sh sumHead) error {
+// parseDeltaStream parses the raw delta stream bytes and validates the tokens.
+// The server uses this to know which blocks the client needs, then sends the full file data.
+func parseDeltaStream(data []byte, sh sumHead) error {
 	offset := 0
 
 	for offset < len(data) {
@@ -254,10 +265,6 @@ func parseDeltaStream(data []byte, out io.Writer, sh sumHead) error {
 			if offset+int(token) > len(data) {
 				return fmt.Errorf("truncated literal data: need %d bytes at offset %d", token, offset)
 			}
-			_, err := out.Write(data[offset : offset+int(token)])
-			if err != nil {
-				return fmt.Errorf("write literal data: %w", err)
-			}
 			offset += int(token)
 		} else {
 			// token reference: blockIndex = -(token+1)
@@ -265,9 +272,6 @@ func parseDeltaStream(data []byte, out io.Writer, sh sumHead) error {
 			if blockIndex < 0 || blockIndex >= sh.count {
 				return fmt.Errorf("invalid block index %d (count=%d)", blockIndex, sh.count)
 			}
-			// token reference means the receiver should seek to this block in its
-			// local copy -- from the sender's perspective, this is a no-op because
-			// the receiver handles the seeking itself.  We just skip over the token.
 		}
 	}
 

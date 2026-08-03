@@ -302,3 +302,39 @@ func TestWriteMode(t *testing.T) {
 		})
 	}
 }
+
+// TestWriteXflags_ProtocolLessThan28 verifies that proto < 28 xflags fallback
+// matches upstream: dirs get XMIT_LONG_NAME (0x40), non-dirs get XMIT_TOP_DIR (0x01).
+// Verified against upstream flist.c send_file_entry():
+//
+//	if (!(xflags & 0xFF))
+//	    xflags |= S_ISDIR(mode) ? XMIT_LONG_NAME : XMIT_TOP_DIR;
+func TestWriteXflags_ProtocolLessThan28(t *testing.T) {
+	tests := []struct {
+		name string
+		mode fs.FileMode
+		want byte
+		desc string
+	}{
+		{"regular_file", 0o644, 0x01, "XMIT_TOP_DIR (harmless on files)"},
+		{"directory", fs.ModeDir | 0o755, 0x40, "XMIT_LONG_NAME for dirs"},
+		{"symlink", fs.ModeSymlink | 0o777, 0x01, "XMIT_TOP_DIR for non-dirs"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			err := writeXflags(&buf, 0, tt.mode, 27, false)
+			if err != nil {
+				t.Fatalf("writeXflags failed: %v", err)
+			}
+			got := buf.Bytes()
+			if len(got) != 1 {
+				t.Fatalf("proto < 28 xflags should be 1 byte, got %d bytes: %v", len(got), got)
+			}
+			if got[0] != tt.want {
+				t.Errorf("writeXflags(xflags=0, mode=%v, version=27) = 0x%02x, want 0x%02x (%s)",
+					tt.mode, got[0], tt.want, tt.desc)
+			}
+		})
+	}
+}

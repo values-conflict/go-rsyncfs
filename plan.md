@@ -287,7 +287,7 @@ type Session struct {
 - `Connect(nil)` with `ConnectFunc` creates connection automatically
 - `Connect(nil)` without `ConnectFunc` returns error
 
-### Task 9 -- Client: `Open` implementation + root mode (`client-open.go`)
+### ~~Task 9 -- Client: `Open` implementation + root mode (`client-open.go`)~~
 
 **Goal:** Implement `fs.FS.Open` for the client side. Opening a file triggers the server-side data transfer protocol (Tasks 6 + 7). Also rearchitect root mode to handle the fact that `#list` closes the connection.
 
@@ -415,6 +415,14 @@ func (s *Session) Open(name string) (fs.File, error)
    - Server behind a stream driven by real rsync client for both pull and push scenarios
    - Client connecting to actual daemon processes started during tests
    - Process management requirements: all started rsync processes must be killed on test completion
+
+## Known Gaps (incomplete features in completed tasks)
+
+These are features that are partially implemented or stubbed but not yet functional:
+
+- **Auth hash computation:** `computeAuthHash()` in `client.go` returns an error (TODO). Authentication cannot actually succeed until md4/md5 digest computation is implemented.
+- **Compat flags negotiation:** The `-e` option mechanism for negotiating `CF_VARINT_FLIST_FLAGS` and other compat flags is not implemented. `sendFileList` accepts a `varintFlistFlags` parameter but it is always `false`. Client-side flist reader does not support varint xflags.
+- **Root mode greeting probe:** `OpenRoot()` skips the greeting exchange and uses configured defaults for version/digest. A proper implementation would do a live greeting exchange.
 
 ## Future Phases (not yet planned into tasks)
 

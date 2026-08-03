@@ -277,11 +277,12 @@ func writeXflags(w io.Writer, xflags int, mode fs.FileMode, version int, varintF
 	}
 
 	// proto < 28: single byte, avoid zero
+	// upstream: xflags |= S_ISDIR(mode) ? XMIT_LONG_NAME : XMIT_TOP_DIR
 	if xflags == 0 {
 		if mode.Type() == fs.ModeDir {
-			xflags = xmitTopDir
-		} else {
 			xflags = xmitLongName
+		} else {
+			xflags = xmitTopDir
 		}
 	}
 	_, err := w.Write([]byte{byte(xflags)})

@@ -85,6 +85,7 @@ type Session struct {
 	digest      string
 	moduleName  string
 	connectFunc func(string) (io.ReadWriter, error) // for root mode, creates connections on-demand
+	prevNdx     int32 // tracks previous positive NDX for compressed delta encoding
 }
 
 var _ fs.FS = (*Session)(nil) // compile-time interface check
@@ -147,6 +148,7 @@ func (c Client) Connect(rw io.ReadWriter) (*Session, error) {
 		version:    version,
 		digest:     digest,
 		moduleName: c.Module,
+		prevNdx:    -1,
 	}
 
 	// --- Phase 2: Module Selection ---
@@ -370,38 +372,6 @@ func (s *Session) Open(name string) (fs.File, error) {
 		return s.openRootMode(name)
 	}
 	return s.openModule(name)
-}
-
-// openRootMode handles opens in root mode where modules are top-level directories.
-// Each operation opens a fresh connection -- the server closes after #list.
-func (s *Session) openRootMode(name string) (fs.File, error) {
-	if name == "." || name == "/" {
-		// do a live #list to get current modules
-		modules, err := doListRequest(s.connectFunc, s.client.Greeting)
-		if err != nil {
-			return nil, fmt.Errorf("list modules: %w", err)
-		}
-		return newRootDir(modules), nil
-	}
-
-	// strip leading slash for routing
-	name = strings.TrimPrefix(name, "/")
-
-	// split into module path
-	parts := strings.SplitN(name, "/", 2)
-	modName := parts[0]
-
-	// TODO connect to the specific module and open the path within it
-	// the server will return @ERROR: Unknown module if it doesn't exist
-	_ = modName
-	return nil, fmt.Errorf("root mode module %q open not yet implemented", modName)
-}
-
-// openModule handles opens within a single connected module.
-func (s *Session) openModule(name string) (fs.File, error) {
-	// TODO implement file/directory opening via rsync protocol this will be implemented in Task 9
-	_ = name
-	return nil, fmt.Errorf("module open not yet implemented")
 }
 
 // rootDirEntry represents a virtual directory entry for a module in root mode.
