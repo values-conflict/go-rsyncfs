@@ -1,0 +1,1 @@
+- what's the shape of upstream's test suite?  could it be adapated or ported so that we can run our implementations against it directly?
