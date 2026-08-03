@@ -70,27 +70,35 @@ func (g *Greeting) String() string {
 }
 
 // Negotiate picks the best common version and digest between two greetings.
-func Negotiate(local, remote Greeting) (version int, subProtocol byte, digest string, err error) {
+//
+// Digest negotiation follows upstream rsync exactly:
+//
+//	"Each side sends their list of valid names to the other side and then both sides pick the first name in the client's list that is also in the server's list."
+//
+// (compat.c:send_negotiate_str)
+//
+// The caller must pass the client's greeting first and the server's greeting second, regardless of which side is calling.
+func Negotiate(client, server Greeting) (version int, subProtocol byte, digest string, err error) {
 	// Version negotiation matches upstream rsync's exchange_protocols logic.
-	if local.Version > remote.Version {
-		version = remote.Version
-		subProtocol = remote.SubProtocol
-		if remote.SubProtocol != 0 {
+	if client.Version > server.Version {
+		version = server.Version
+		subProtocol = server.SubProtocol
+		if server.SubProtocol != 0 {
 			version--
 			subProtocol = 0 // downgrade to stable version of the lower protocol
 		}
-	} else if local.Version == remote.Version {
-		version = local.Version
-		subProtocol = local.SubProtocol
-		if local.SubProtocol != remote.SubProtocol {
+	} else if client.Version == server.Version {
+		version = client.Version
+		subProtocol = client.SubProtocol
+		if client.SubProtocol != server.SubProtocol {
 			version--
 			subProtocol = 0 // downgrade to stable version of the lower protocol
 		}
-	} else { // local.Version < remote.Version
+	} else { // client.Version < server.Version
 		// If we are the older version and have a non-zero subprotocol, downgrade by one.
-		version = local.Version
-		subProtocol = local.SubProtocol
-		if local.SubProtocol != 0 {
+		version = client.Version
+		subProtocol = client.SubProtocol
+		if client.SubProtocol != 0 {
 			version--
 			subProtocol = 0 // downgrade to stable version of the lower protocol
 		}
@@ -100,12 +108,12 @@ func Negotiate(local, remote Greeting) (version int, subProtocol byte, digest st
 		return 0, 0, "", fmt.Errorf("negotiated protocol version %d is too low (min 20)", version)
 	}
 
-	// Digest negotiation: pick the first algorithm that appears in both lists.
+	// Digest negotiation: client preference wins. pick the first algorithm in the client's list that also appears in the server's list.
 Loop:
-	for _, ld := range local.Digests {
-		for _, rd := range remote.Digests {
-			if ld == rd {
-				digest = ld
+	for _, cd := range client.Digests {
+		for _, sd := range server.Digests {
+			if cd == sd {
+				digest = cd
 				break Loop
 			}
 		}

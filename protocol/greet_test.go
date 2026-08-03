@@ -73,44 +73,50 @@ func TestParseGreeting(t *testing.T) {
 func TestNegotiate(t *testing.T) {
 	tests := []struct {
 		name       string
-		local      Greeting
-		remote     Greeting
+		client     Greeting
+		server     Greeting
 		wantVer    int
 		wantSub    byte
 		wantDigest string
 	}{
 		{
-			"Same version",
+			"same version and digests",
 			Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5", "sha1"}},
 			Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5", "sha1"}},
 			32, 0, "md5",
 		},
 		{
-			"Local newer",
+			"client newer",
 			Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5", "sha1"}},
 			Greeting{Version: 30, SubProtocol: 0, Digests: []string{"md4", "md5"}},
 			30, 0, "md5",
 		},
 		{
-			"Remote newer",
+			"server newer",
 			Greeting{Version: 30, SubProtocol: 0, Digests: []string{"md4", "md5"}},
 			Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5", "sha1"}},
 			30, 0, "md5",
 		},
 		{
-			"Subprotocol mismatch (local newer)",
+			"client preference wins -- reversed digest order",
+			Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md4", "md5"}},
+			Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5", "md4"}},
+			32, 0, "md4", // client prefers md4, so md4 wins
+		},
+		{
+			"subprotocol mismatch (client newer)",
 			Greeting{Version: 32, SubProtocol: 1, Digests: []string{"md5"}},
 			Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
 			31, 0, "md5",
 		},
 		{
-			"Subprotocol mismatch (remote newer)",
+			"subprotocol mismatch (server newer)",
 			Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
 			Greeting{Version: 32, SubProtocol: 1, Digests: []string{"md5"}},
 			31, 0, "md5",
 		},
 		{
-			"Subprotocol mismatch (local older)",
+			"subprotocol mismatch (client older)",
 			Greeting{Version: 30, SubProtocol: 1, Digests: []string{"md4"}},
 			Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
 			29, 0, "md4",
@@ -119,7 +125,7 @@ func TestNegotiate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ver, sub, dig, err := Negotiate(tt.local, tt.remote)
+			ver, sub, dig, err := Negotiate(tt.client, tt.server)
 			if err != nil {
 				t.Errorf("Negotiate() error = %v", err)
 				return

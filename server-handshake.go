@@ -49,7 +49,8 @@ func (s *Server) HandleConnection(rw io.ReadWriter, opts HandleOptions) (*Handsh
 		return nil, fmt.Errorf("failed to parse client greeting: %w", err)
 	}
 
-	version, _, digest, err := protocol.Negotiate(opts.LocalGreeting, *clientGreeting)
+	// Negotiate always takes (client, server) -- client preference wins digest selection
+	version, _, digest, err := protocol.Negotiate(*clientGreeting, opts.LocalGreeting)
 	if err != nil {
 		_ = s.SendError(rw, "protocol version negotiation failed")
 		return nil, fmt.Errorf("negotiation error: %w", err)

@@ -374,7 +374,14 @@ The buffer is treated as signed chars (`schar`), but `CHAR_OFFSET = 0` in modern
 
 **Digest lengths:** MD4/MD5 = 16 bytes, SHA-1 = 20, SHA-256 = 32, SHA-512 = 64, XXH64/XXH3-64 = 8, XXH3-128 = 16.
 
-**Digest negotiation:** During Phase 1 greeting exchange, each side advertises supported digests. The winner is the first algorithm in the **client's list** that also appears in the server's list (client's preference order wins). If no overlap: MD5 for proto ≥ 30, MD4 otherwise.
+**Digest negotiation:** During Phase 1 greeting exchange, each side advertises supported digests. The winner is the first algorithm in the **client's list** that also appears in the server's list (client's preference order wins). From upstream `compat.c:send_negotiate_str`:
+
+```
+/* Each side sends their list of valid names to the other side and then both sides
+ * pick the first name in the client's list that is also in the server's list. */
+```
+
+If no overlap: MD5 for proto ≥ 30, MD4 otherwise.
 
 ### Block Checksums (after header, only if count > 0)
 For each block `i` in `[0..count-1]`:
