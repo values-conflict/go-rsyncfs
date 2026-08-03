@@ -85,7 +85,7 @@ type Session struct {
 	digest      string
 	moduleName  string
 	connectFunc func(string) (io.ReadWriter, error) // for root mode, creates connections on-demand
-	prevNdx     int32 // tracks previous positive NDX for compressed delta encoding
+	prevNdx     int32                               // tracks previous positive NDX for compressed delta encoding
 }
 
 var _ fs.FS = (*Session)(nil) // compile-time interface check

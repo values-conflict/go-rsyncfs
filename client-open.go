@@ -660,9 +660,9 @@ type dirEntry struct {
 	entry fileListEntry
 }
 
-func (e *dirEntry) Name() string       { return e.entry.name }
-func (e *dirEntry) IsDir() bool        { return e.entry.mode.IsDir() }
-func (e *dirEntry) Type() fs.FileMode  { return e.entry.mode.Type() }
+func (e *dirEntry) Name() string               { return e.entry.name }
+func (e *dirEntry) IsDir() bool                { return e.entry.mode.IsDir() }
+func (e *dirEntry) Type() fs.FileMode          { return e.entry.mode.Type() }
 func (e *dirEntry) Info() (fs.FileInfo, error) { return e.entryInfo(), nil }
 
 func (e *dirEntry) entryInfo() *fileInfo {

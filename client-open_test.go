@@ -599,7 +599,6 @@ func TestFilterChildren_SubDir(t *testing.T) {
 	}
 }
 
-
 // TestWriteNdx_Compressed verifies compressed NDX encoding matches upstream io.c write_ndx().
 // Each test case is independent (writeNdx takes prevNdx as a pointer, not static state).
 func TestWriteNdx_Compressed(t *testing.T) {
@@ -620,9 +619,9 @@ func TestWriteNdx_Compressed(t *testing.T) {
 		{"ndx_done", -1, 30, 42, 42, []byte{0x00}},
 
 		// Single-byte diff (1-253)
-		{"first_positive", 0, 30, -1, 0, []byte{0x01}},       // diff = 0-(-1) = 1
-		{"diff_one", 1, 30, 0, 1, []byte{0x01}},              // diff = 1-0 = 1
-		{"diff_253", 254, 30, 1, 254, []byte{0xfd}},          // diff = 254-1 = 253
+		{"first_positive", 0, 30, -1, 0, []byte{0x01}}, // diff = 0-(-1) = 1
+		{"diff_one", 1, 30, 0, 1, []byte{0x01}},        // diff = 1-0 = 1
+		{"diff_253", 254, 30, 1, 254, []byte{0xfd}},    // diff = 254-1 = 253
 
 		// 2-byte diff (0 or 254-32767)
 		{"diff_zero", 100, 30, 100, 100, []byte{0xfe, 0x00, 0x00}},
@@ -634,7 +633,7 @@ func TestWriteNdx_Compressed(t *testing.T) {
 		// Negative indices: 0xFF prefix, then same diff encoding on abs value
 		// prev_negative starts at 1 (absolute value of last negative seen)
 		{"negative_first", -2, 30, 1, 2, []byte{0xff, 0x01}},  // abs=2, diff=2-1=1
-		{"negative_second", -3, 30, 2, 3, []byte{0xff, 0x01}},  // abs=3, diff=3-2=1
+		{"negative_second", -3, 30, 2, 3, []byte{0xff, 0x01}}, // abs=3, diff=3-2=1
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
