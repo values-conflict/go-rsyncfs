@@ -120,7 +120,8 @@ type ServerModule struct {
 	ReadOnly bool
 }
 
-func (s *Server) AddModule(m *ServerModule) error
+// NewServer constructs a Server with the given modules.
+func NewServer(mods ...*ServerModule) (*Server, error)
 ```
 
 **Key Details:**
@@ -128,6 +129,7 @@ func (s *Server) AddModule(m *ServerModule) error
 - Server wraps local io/fs.FS and serves it over rsync protocol, but does NOT directly implement fs.FS interface in normal operation
 - In root mode scenarios with multiple modules, the server may need to provide virtual filesystem access (but this is a special case)
 - Error response formatting follows @ERROR: line format exactly as specified upstream
+- Constructed via `NewServer` with variadic modules -- all modules known at construction time
 
 **Tests:**
 
@@ -201,8 +203,9 @@ func sendFileList(w *mux.Writer, rootFS fs.FS, basePath string, version int) err
 **API sketch:**
 
 ```go
-// SendFile sends one file via the multiplexed I/O layer using rsync's block checksum protocol.
-func sendFile(w *mux.Writer, f fs.File, version int) error
+// sendFile sends one file via the multiplexed I/O layer using rsync's block checksum protocol.
+// Takes both reader and writer because the server must read the delta stream from the client.
+func sendFile(r *mux.Reader, w *mux.Writer, f fs.File, version int) error
 ```
 
 **Key details:**
@@ -212,6 +215,7 @@ func sendFile(w *mux.Writer, f fs.File, version int) error
 - Read delta map from client and transmit only mismatched blocks
 - Send `MSG_SUCCESS` with file index when done
 - **Role:** In this read-only FS context, the server acts as the *Sender* in rsync's terminology (providing data to a receiver).
+- **Role:** In this read-only FS context, the server acts as the *Sender* in rsync's terminology (providing data to a receiver). The `r *mux.Reader` parameter is required because the server must read the delta stream from the client to know which blocks to send
 
 **Tests:**
 
@@ -244,18 +248,24 @@ type Client struct {
 
 // Connect runs the handshake and returns an active session ready for FS operations.
 // If rw is nil and ConnectFunc is set, ConnectFunc creates the connection.
-func (c *Client) Connect(rw io.ReadWriter) (*Session, error)
+func (c Client) Connect(rw io.ReadWriter) (*Session, error) // value receiver -- Client is a plain config struct
 
 // OpenRoot returns a Session for root mode (modules as top-level dirs).
-func (c *Client) OpenRoot() (*Session, error)
+func (c Client) OpenRoot() (*Session, error)
+
+// PasswordAuth returns an AuthResponse function for the standard password+challenge digest flow.
+func PasswordAuth(password string) func(challenge []byte, digest string) ([]byte, error)
 
 type Session struct {
 	client      *Client
-	rw          io.ReadWriter
+	rw          io.ReadWriter // live connection (nil in root mode)
+	muxReader   *mux.Reader   // nil in root mode
+	muxWriter   *mux.Writer   // nil in root mode
 	version     int
 	digest      string
 	moduleName  string
-	connectFunc func(string) (io.ReadWriter, error) // nil except in root mode
+	connectFunc func(string) (io.ReadWriter, error) // for root mode
+	prevNdx     int32 // tracks previous positive NDX for compressed delta encoding
 }
 ```
 
@@ -264,7 +274,10 @@ type Session struct {
 - `Client` is a plain config struct -- no constructor, no separate ClientConfig type
 - `Session` (not `Client`) implements `io/fs.FS` to present remote filesystem as local
 - `Connect()` accepts nil `rw` when `ConnectFunc` is set -- creates the connection automatically
-- **Root mode is NOT part of Task 8.** The `#list` protocol call closes the server connection (verified against upstream), so root mode cannot use a single persistent connection. It requires a separate rearchitecture (see Task 9).
+- `Connect` uses a **value receiver** (not pointer) since `Client` is an immutable config struct
+- **`PasswordAuth` helper:** convenience function that returns an `AuthResponse` for standard password+challenge digest flow
+- **`computeAuthHash` is a TODO:** the actual hash computation (md4, md5, etc.) is not yet implemented -- returns an error for now
+- **Root mode is NOT part of Task 8.** The `#list` protocol call closes the server connection (verified against upstream), so root mode cannot use a single persistent connection. It requires a separate approach (see Task 9).
 
 **Tests:**
 
@@ -274,7 +287,7 @@ type Session struct {
 - `Connect(nil)` with `ConnectFunc` creates connection automatically
 - `Connect(nil)` without `ConnectFunc` returns error
 
-### Task 9 -- Client: `Open` implementation + root mode rearchitecture (`client-open.go`)
+### Task 9 -- Client: `Open` implementation + root mode (`client-open.go`)
 
 **Goal:** Implement `fs.FS.Open` for the client side. Opening a file triggers the server-side data transfer protocol (Tasks 6 + 7). Also rearchitect root mode to handle the fact that `#list` closes the connection.
 
@@ -294,7 +307,9 @@ func (s *Session) Open(name string) (fs.File, error)
 - The returned `fs.File` implements both `Read()` (for regular files) and `Readdir()` (for directories)
 - Symlinks are handled by returning appropriate Mode() flags with target information when available
 - **Metadata Mapping:** Map rsync wire-format modes and permissions back to Go `os.FileMode`
-- **Root Mode rearchitecture:** Since `#list` closes the server connection (verified against upstream), root mode cannot use a single persistent connection. `Session` in root mode acts as a config holder (connection params, not a live socket). `ReadDir` on root opens a fresh connection, sends `#list`, reads modules, and closes. `Open` on a module path opens a fresh connection to that specific module. Each FS operation gets its own connection.
+- **Root mode:** Since `#list` closes the server connection (verified against upstream), root mode cannot use a single persistent connection. `Session` in root mode acts as a config holder (connection params, not a live socket). `ReadDir` on root opens a fresh connection, sends `#list`, reads modules, and closes. `Open` on a module path opens a fresh connection to that specific module. Each FS operation gets its own connection.
+- **`OpenRoot` skips greeting probe (TODO):** `OpenRoot` uses configured defaults for version/digest without doing a live greeting exchange. A proper implementation would open a connection, do greeting exchange, then close.
+- **Flist reader only supports basic byte xflags (TODO):** The client-side flist reader (`flistReader.readXflags`) does not support varint xflags when `CF_VARINT_FLIST_FLAGS` is negotiated.
 
 **Tests:**
 
