@@ -106,8 +106,7 @@ func checksum2(data []byte, s2length int) []byte {
 }
 
 // sendFile sends one file via the multiplexed I/O layer using rsync's block checksum protocol.
-// The server acts as the sender: it provides block checksums, receives a delta stream from the
-// client, sends the file data, and verifies with a final checksum.
+// The server acts as the sender: it provides block checksums, receives a delta stream from the client, sends the file data, and verifies with a final checksum.
 //
 // The protocol flow is:
 //  1. Server sends sum_head (block count, block size, etc.) as MSG_DATA
@@ -139,8 +138,8 @@ func sendFile(r *mux.Reader, w *mux.Writer, f fs.File, version int) error {
 	}
 
 	// --- step 3: read delta stream from client ---
-	// the delta stream tells us which blocks the client needs.
-	// for a fresh pull (no local copy), the client sends token references for all blocks.
+	// the delta stream tells us which blocks the client needs
+	// for a fresh pull (no local copy), the client sends token references for all blocks
 	if err := readDeltaStream(r, sh); err != nil {
 		return fmt.Errorf("read delta stream: %w", err)
 	}

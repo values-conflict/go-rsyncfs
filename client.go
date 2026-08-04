@@ -17,36 +17,39 @@ import (
 // Client configures a connection to an rsync daemon module.
 // Construct directly with &Client{...}; zero-value fields use sensible defaults applied lazily during [Client.Connect] or [Client.OpenRoot].
 type Client struct {
-	// Module is the rsync module name to connect to.
-	// Empty string enables root mode (all modules as top-level directories).
+	// Module is the rsync module name to connect to. Empty
+	// string enables root mode (all modules as top-level directories).
 	Module string
 
-	// Greeting is the greeting sent to the server.
-	// Zero value defaults to protocol version 32 with md5/md4 digests.
+	// Greeting is the greeting sent to the server. Zero value defaults to
+	// protocol version 32 with md5/md4 digests.
 	Greeting protocol.Greeting
 
-	// AuthUser is the username for module authentication.
-	// Empty string means anonymous access.
+	// AuthUser is the username for module authentication. Empty
+	// string means anonymous access.
 	AuthUser string
 
-	// AuthResponse computes the auth response hash given the server's challenge
-	// and the negotiated digest algorithm. The returned raw hash bytes are
-	// base64-encoded by the library before sending.
-	// Nil means anonymous access (AuthUser must also be empty).
-	// Use [PasswordAuth] for the standard password+challenge digest flow.
+	// AuthResponse computes the auth response hash given
+	// the server's challenge and the negotiated digest algorithm.
+	// The returned raw hash bytes are base64-encoded by the
+	// library before sending. Nil means anonymous access (AuthUser
+	// must also be empty). Use [PasswordAuth] for the standard
+	// password+challenge digest flow.
 	AuthResponse func(challenge []byte, digest string) ([]byte, error)
 
 	// ConnectFunc creates a new connection to the rsync server.
-	// Required for root mode (Module == ""). The moduleName argument is
-	// the target module name, or empty string for a #list request.
+	// Required for root mode (Module == ""). The moduleName argument
+	// is the target module name, or empty string for a #list request.
 	// The caller is responsible for closing the returned ReadWriter.
 	//
-	// In root mode, each FS operation (listing modules, opening a module)
-	// gets its own connection -- the server closes the connection after #list,
-	// so a single persistent connection is not possible.
+	// In root mode, each FS operation (listing modules, opening a
+	// module) gets its own connection -- the server closes the
+	// connection after #list, so a single persistent connection is
+	// not possible.
 	//
-	// When used with [Client.Connect] and a nil io.ReadWriter, ConnectFunc
-	// is called with the configured Module name to create the connection.
+	// When used with [Client.Connect] and a nil io.ReadWriter,
+	// ConnectFunc is called with the configured Module name to create
+	// the connection.
 	ConnectFunc func(moduleName string) (io.ReadWriter, error)
 }
 
@@ -158,10 +161,10 @@ func (c Client) Connect(rw io.ReadWriter) (*Session, error) {
 	}
 
 	// --- Authentication (if server responds with AUTHREQD) ---
-	// when auth is configured on the server, it sends AUTHREQD after module selection.
-	// when auth is not configured, the server sends nothing and proceeds to read arguments.
-	// we need to peek at the next line to see if it's AUTHREQD.
-	// since we can't truly peek, we read one line and check what it is.
+	// when auth is configured on the server, it sends AUTHREQD after module selection
+	// when auth is not configured, the server sends nothing and proceeds to read arguments
+	// we need to peek at the next line to see if it's AUTHREQD
+	// since we can't truly peek, we read one line and check what it is
 
 	authLine, err := readLine(rw)
 	if err != nil {

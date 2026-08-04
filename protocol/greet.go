@@ -79,7 +79,7 @@ func (g *Greeting) String() string {
 //
 // The caller must pass the client's greeting first and the server's greeting second, regardless of which side is calling.
 func Negotiate(client, server Greeting) (version int, subProtocol byte, digest string, err error) {
-	// Version negotiation matches upstream rsync's exchange_protocols logic.
+	// version negotiation matches upstream rsync's exchange_protocols logic
 	if client.Version > server.Version {
 		version = server.Version
 		subProtocol = server.SubProtocol
@@ -95,7 +95,7 @@ func Negotiate(client, server Greeting) (version int, subProtocol byte, digest s
 			subProtocol = 0 // downgrade to stable version of the lower protocol
 		}
 	} else { // client.Version < server.Version
-		// If we are the older version and have a non-zero subprotocol, downgrade by one.
+		// if we are the older version and have a non-zero subprotocol, downgrade by one
 		version = client.Version
 		subProtocol = client.SubProtocol
 		if client.SubProtocol != 0 {
@@ -108,7 +108,7 @@ func Negotiate(client, server Greeting) (version int, subProtocol byte, digest s
 		return 0, 0, "", fmt.Errorf("negotiated protocol version %d is too low (min 20)", version)
 	}
 
-	// Digest negotiation: client preference wins. pick the first algorithm in the client's list that also appears in the server's list.
+	// digest negotiation: client preference wins. pick the first algorithm in the client's list that also appears in the server's list
 Loop:
 	for _, cd := range client.Digests {
 		for _, sd := range server.Digests {
@@ -119,7 +119,7 @@ Loop:
 		}
 	}
 
-	// Fallback if no common digest found
+	// fallback if no common digest found
 	if digest == "" {
 		if version >= 30 {
 			digest = "md5"

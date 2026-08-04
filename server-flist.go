@@ -153,8 +153,7 @@ func sendFileList(w *mux.Writer, rootFS fs.FS, basePath string, version int, var
 	return w.WriteMsg(mux.MsgData, buf.Bytes())
 }
 
-// walkFS performs a pre-order walk of rootFS rooted at basePath, returning entries
-// in sorted order (matching upstream rsync sort behavior).
+// walkFS performs a pre-order walk of rootFS rooted at basePath, returning entries in sorted order (matching upstream rsync sort behavior).
 func walkFS(rootFS fs.FS, basePath string) ([]fileEntry, error) {
 	var entries []fileEntry
 

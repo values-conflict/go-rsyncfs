@@ -117,7 +117,7 @@ func WriteLongInt(w io.Writer, x int64) error {
 		return err
 	}
 
-	// Sentinel + full int64 LE
+	// sentinel + full int64 LE
 	sentinel := [4]byte{0xFF, 0xFF, 0xFF, 0xFF}
 	if _, err := w.Write(sentinel[:]); err != nil {
 		return err
@@ -140,7 +140,7 @@ func ReadLongInt(r io.Reader) (int64, error) {
 		return int64(val32), nil
 	}
 
-	// Sentinel found, read full int64 LE
+	// sentinel found, read full int64 LE
 	b64 := make([]byte, 8)
 	if _, err := io.ReadFull(r, b64); err != nil {
 		return 0, err

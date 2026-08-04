@@ -163,7 +163,7 @@ func (fr *flistReader) readEntry(index int) (*fileListEntry, error) {
 // readXflags reads the xmit flags from the stream.
 func (fr *flistReader) readXflags() (int, error) {
 	// for now, assume basic byte encoding (matches our server's default behavior)
-	// TODO: support varint xflags when CF_VARINT_FLIST_FLAGS is negotiated
+	// TODO support varint xflags when CF_VARINT_FLIST_FLAGS is negotiated
 	b, err := fr.r.ReadByte()
 	if err != nil {
 		return 0, err

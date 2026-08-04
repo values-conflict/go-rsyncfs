@@ -220,7 +220,7 @@ func readNullTerminatedArgs(rw io.Reader) ([]string, error) {
 		}
 		if b[0] == '\x00' {
 			if lastWasNull {
-				// Double null encountered: end of arguments
+				// double null encountered: end of arguments
 				break
 			}
 			lastWasNull = true
@@ -257,7 +257,7 @@ func readNewlineTerminatedArgs(rw io.Reader) ([]string, error) {
 		}
 		if b[0] == '\n' {
 			if lastWasNewline {
-				// Double newline encountered: end of arguments
+				// double newline encountered: end of arguments
 				break
 			}
 			lastWasNewline = true
