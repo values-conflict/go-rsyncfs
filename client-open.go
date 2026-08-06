@@ -616,7 +616,12 @@ func (d *moduleDirFile) Read([]byte) (int, error) { return 0, fs.ErrInvalid }
 
 func (d *moduleDirFile) ReadDir(n int) ([]fs.DirEntry, error) {
 	if d.pos >= len(d.entries) {
-		return nil, io.EOF
+		// n <= 0: return nil, nil on success (reads to end)
+		// n > 0: return io.EOF at end of directory
+		if n > 0 {
+			return nil, io.EOF
+		}
+		return nil, nil
 	}
 
 	if n <= 0 || n > len(d.entries)-d.pos {

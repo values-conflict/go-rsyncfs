@@ -187,6 +187,61 @@ func TestClientOpen_Directory(t *testing.T) {
 	}
 }
 
+func TestClientOpen_ReadDirEndOfDirectory(t *testing.T) {
+	mod := &ServerModule{
+		Name: "testmod",
+		FS: fstest.MapFS{
+			"file.txt": {Data: []byte("hello")},
+		},
+	}
+
+	conn := setupTestServer(t, mod, false)
+	defer conn.Close()
+
+	client := &Client{Module: "testmod"}
+	session, err := client.Connect(conn)
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	df, err := session.Open(".")
+	if err != nil {
+		t.Fatalf("Open(.) failed: %v", err)
+	}
+	defer df.Close()
+
+	dirFile, ok := df.(interface {
+		ReadDir(n int) ([]fs.DirEntry, error)
+	})
+	if !ok {
+		t.Fatal("opened file does not support ReadDir")
+	}
+
+	// first read: get all entries with n=0
+	entries, err := dirFile.ReadDir(0)
+	if err != nil {
+		t.Fatalf("first ReadDir(0) failed: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+
+	// second read with n <= 0: should return nil, nil (not io.EOF)
+	entries, err = dirFile.ReadDir(0)
+	if err != nil {
+		t.Errorf("ReadDir(0) at end of directory returned error: %v (expected nil)", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 entries, got %d", len(entries))
+	}
+
+	// read with n > 0 at end: should return io.EOF
+	entries, err = dirFile.ReadDir(1)
+	if err != io.EOF {
+		t.Errorf("ReadDir(1) at end of directory returned %v, want io.EOF", err)
+	}
+}
+
 func TestClientOpen_SubDirectory(t *testing.T) {
 	mod := &ServerModule{
 		Name: "testmod",
@@ -249,6 +304,39 @@ func TestClientOpen_NotExist(t *testing.T) {
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("expected ErrNotExist, got: %v", err)
+	}
+}
+
+func TestClientOpen_Symlink(t *testing.T) {
+	mod := &ServerModule{
+		Name: "testmod",
+		FS: fstest.MapFS{
+			"target.txt":  {Data: []byte("target content")},
+			"link.txt":    {Data: []byte("target.txt"), Mode: fs.ModeSymlink | 0o777},
+		},
+	}
+
+	conn := setupTestServer(t, mod, false)
+	defer conn.Close()
+
+	client := &Client{Module: "testmod"}
+	session, err := client.Connect(conn)
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	f, err := session.Open("link.txt")
+	if err != nil {
+		t.Fatalf("Open(link.txt) failed: %v", err)
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		t.Fatalf("Stat failed: %v", err)
+	}
+	if info.Mode()&fs.ModeSymlink == 0 {
+		t.Errorf("expected symlink mode, got %v", info.Mode())
 	}
 }
 
