@@ -4,6 +4,8 @@ Each task below is designed to be implementable and testable in a single focused
 
 As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N -- do some stuff` -> `### ~~Task N -- do some stuff~~`; `## Phase N: do stuff` -> `## ~~Phase N: do stuff~~`).
 
+**No "Known Gaps" allowed.**  If a task is incomplete, its title is not strikethrough.  If implementation reveals the plan is wrong, update the plan.  If a feature is out of scope for a task, split the task.  Never document a gap as accepted debt -- either finish the work or leave the task unmarked.
+
 ## Phase 0: Foundation
 
 ### ~~Task 1 -- Multiplexed I/O layer (`protocol/mux/`)~~
