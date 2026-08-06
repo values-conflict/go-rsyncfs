@@ -6,8 +6,6 @@
   - for example, `PasswordAuth` does not
   - a task is not complete until all the code has meaningful tests
 
-- close the "Known Gaps" in our implementation, remove them from the plan, and expressly forbid leaving "known gaps" in the future
-
 - verify all comments match the appropriate/correct format
 
 - should we summarize the relevant tianonfmt rules here somewhere so they're easier/quicker to reference?  maybe make the upstream tianonfmt docs themselves tighter somehow?

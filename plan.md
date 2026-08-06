@@ -148,9 +148,10 @@ func NewServer(mods ...*ServerModule) (*Server, error)
 
 ```go
 type HandshakeResult struct {
-	Module  *ServerModule
-	Version int
-	Digest  string
+	Module           *ServerModule
+	Version          int
+	Digest           string
+	VarintFlistFlags bool // true when CF_VARINT_FLIST_FLAGS is negotiated
 }
 
 // HandleConnection runs the full text-phase handshake on a single connection.
@@ -169,6 +170,7 @@ type HandleOptions struct {
 - Unknown module → `@ERROR: Unknown module`
 - Auth challenge/response flow (with and without callback)
 - Argument parsing: null-terminated (proto ≥ 30) vs newline-terminated
+- Compat flags exchange: server parses `-e` argument, sends resolved flags as varint (proto ≥ 30)
 
 ### ~~Task 6 -- Server: file list generation (`server-flist.go`)~~
 
@@ -179,8 +181,9 @@ type HandleOptions struct {
 **API sketch:**
 
 ```go
-// SendFileList walks rootFS starting at basePath and writes entries to w.
-func sendFileList(w *mux.Writer, rootFS fs.FS, basePath string, version int) error
+// sendFileList walks rootFS starting at basePath and writes entries to w.
+// varintFlistFlags enables varint xflags encoding when CF_VARINT_FLIST_FLAGS is negotiated.
+func sendFileList(w *mux.Writer, rootFS fs.FS, basePath string, version int, varintFlistFlags bool) error
 ```
 
 **Key details:**
@@ -240,7 +243,7 @@ type Client struct {
 	Module       string  // module name ("" for root mode)
 	Greeting     protocol.Greeting
 	AuthUser     string
-	AuthResponse func(challenge []byte, digest string) ([]byte, error)
+	AuthResponse func(digest string, challenge []byte) ([]byte, error)
 	ConnectFunc  func(moduleName string) (io.ReadWriter, error)
 }
 
@@ -255,7 +258,7 @@ func (c Client) Connect(rw io.ReadWriter) (*Session, error) // value receiver --
 func (c Client) OpenRoot() (*Session, error)
 
 // PasswordAuth returns an AuthResponse function for the standard password+challenge digest flow.
-func PasswordAuth(password string) func(challenge []byte, digest string) ([]byte, error)
+func PasswordAuth(password string) func(digest string, challenge []byte) ([]byte, error)
 
 type Session struct {
 	client      *Client
@@ -276,8 +279,7 @@ type Session struct {
 - `Session` (not `Client`) implements `io/fs.FS` to present remote filesystem as local
 - `Connect()` accepts nil `rw` when `ConnectFunc` is set -- creates the connection automatically
 - `Connect` uses a **value receiver** (not pointer) since `Client` is an immutable config struct
-- **`PasswordAuth` helper:** convenience function that returns an `AuthResponse` for standard password+challenge digest flow
-- **`computeAuthHash` is a TODO:** the actual hash computation (md4, md5, etc) is not yet implemented -- returns an error for now
+- **`PasswordAuth` helper:** convenience function that returns an `AuthResponse` for standard password+challenge digest flow (md4 via `golang.org/x/crypto/md4`, md5 via `crypto/md5`)
 - **Root mode is NOT part of Task 8.**  The `#list` protocol call closes the server connection (verified against upstream), so root mode cannot use a single persistent connection.  It requires a separate approach (see Task 9).
 
 **Tests:**
@@ -287,6 +289,8 @@ type Session struct {
 - Module listing via client returns expected results
 - `Connect(nil)` with `ConnectFunc` creates connection automatically
 - `Connect(nil)` without `ConnectFunc` returns error
+- Auth hash computation: `PasswordAuth` produces correct md4/md5 digests
+- Compat flags: client sends `-e` argument with feature flags, reads server's compat flags varint
 
 ### ~~Task 9 -- Client: `Open` implementation + root mode (`client-open.go`)~~
 
@@ -309,8 +313,8 @@ func (s *Session) Open(name string) (fs.File, error)
 - Symlinks are handled by returning appropriate Mode() flags with target information when available
 - **Metadata Mapping:** Map rsync wire-format modes and permissions back to Go `os.FileMode`
 - **Root mode:** Since `#list` closes the server connection (verified against upstream), root mode cannot use a single persistent connection.  `Session` in root mode acts as a config holder (connection params, not a live socket).  `ReadDir` on root opens a fresh connection, sends `#list`, reads modules, and closes.  `Open` on a module path opens a fresh connection to that specific module.  Each FS operation gets its own connection.
-- **`OpenRoot` skips greeting probe (TODO):** `OpenRoot` uses configured defaults for version/digest without doing a live greeting exchange.  A proper implementation would open a connection, do greeting exchange, then close.
-- **Flist reader only supports basic byte xflags (TODO):** The client-side flist reader (`flistReader.readXflags`) does not support varint xflags when `CF_VARINT_FLIST_FLAGS` is negotiated.
+- **`OpenRoot` does no greeting probe:** every FS operation already opens a fresh connection with a full greeting exchange, so a separate probe would be a redundant round-trip.
+- **Flist reader supports both byte and varint xflags:** `flistReader.readXflags` handles varint encoding when `CF_VARINT_FLIST_FLAGS` is negotiated via the compat flags exchange.
 
 **Tests:**
 
@@ -320,6 +324,7 @@ func (s *Session) Open(name string) (fs.File, error)
 - Error cases: non-existent path, permission denied from server side
 - Root mode: `ReadDir` on root does a live `#list` call (fresh connection each time)
 - Root mode: entering a module directory opens a separate connection to that module
+- Flist reader: varint xflags decoded correctly when `CF_VARINT_FLIST_FLAGS` is negotiated
 
 ### Task 10 -- Cross-implementation tests (`cross_test.go`)
 
@@ -416,14 +421,6 @@ func (s *Session) Open(name string) (fs.File, error)
    - Server behind a stream driven by real rsync client for both pull and push scenarios
    - Client connecting to actual daemon processes started during tests
    - Process management requirements: all started rsync processes must be killed on test completion
-
-## Known Gaps (incomplete features in completed tasks)
-
-These are features that are partially implemented or stubbed but not yet functional:
-
-- **Auth hash computation:** `computeAuthHash()` in `client.go` returns an error (TODO).  Authentication cannot actually succeed until md4/md5 digest computation is implemented.
-- **Compat flags negotiation:** The `-e` option mechanism for negotiating `CF_VARINT_FLIST_FLAGS` and other compat flags is not implemented.  `sendFileList` accepts a `varintFlistFlags` parameter but it is always `false`.  Client-side flist reader does not support varint xflags.
-- **Root mode greeting probe:** `OpenRoot()` skips the greeting exchange and uses configured defaults for version/digest.  A proper implementation would do a live greeting exchange.
 
 ## Future Phases (not yet planned into tasks)
 

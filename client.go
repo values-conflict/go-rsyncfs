@@ -2,13 +2,17 @@ package rsyncfs
 
 import (
 	"bytes"
+	"crypto/md5"
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"hash"
 	"io"
 	"io/fs"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/md4"
 
 	"github.com/values-conflict/go-rsyncfs/protocol"
 	"github.com/values-conflict/go-rsyncfs/protocol/mux"
@@ -35,7 +39,7 @@ type Client struct {
 	// library before sending. Nil means anonymous access (AuthUser
 	// must also be empty). Use [PasswordAuth] for the standard
 	// password+challenge digest flow.
-	AuthResponse func(challenge []byte, digest string) ([]byte, error)
+	AuthResponse func(digest string, challenge []byte) ([]byte, error)
 
 	// ConnectFunc creates a new connection to the rsync server.
 	// Required for root mode (Module == ""). The moduleName argument
@@ -65,30 +69,45 @@ func (c *Client) applyDefaults() {
 }
 
 // PasswordAuth returns an AuthResponse function that computes the standard rsync auth hash: digest(password + challenge) using the negotiated algorithm.
-func PasswordAuth(password string) func(challenge []byte, digest string) ([]byte, error) {
-	return func(challenge []byte, digest string) ([]byte, error) {
-		return computeAuthHash(password, challenge, digest)
+func PasswordAuth(password string) func(digest string, challenge []byte) ([]byte, error) {
+	return func(digest string, challenge []byte) ([]byte, error) {
+		return computeAuthHash(digest, password, challenge)
 	}
 }
 
 // computeAuthHash computes the rsync auth response hash: digest(password + challenge).
-func computeAuthHash(password string, challenge []byte, digest string) ([]byte, error) {
-	// TODO implement md4, md5, and any other digests rsync supports
-	return nil, fmt.Errorf("auth digest %q not yet implemented", digest)
+func computeAuthHash(digest string, password string, challenge []byte) ([]byte, error) {
+	var h hash.Hash
+	switch digest {
+	case "md4":
+		h = md4.New()
+	case "md5":
+		h = md5.New()
+	default:
+		return nil, fmt.Errorf("auth digest %q not supported", digest)
+	}
+	if _, err := io.WriteString(h, password); err != nil {
+		return nil, err
+	}
+	if _, err := h.Write(challenge); err != nil {
+		return nil, err
+	}
+	return h.Sum(nil), nil
 }
 
 // Session holds an active connection to an rsync daemon, ready for FS operations.
 // In root mode (Module == ""), the Session is a config holder -- connectFunc creates fresh connections for each operation (the server closes after #list).
 type Session struct {
-	client      *Client
-	rw          io.ReadWriter // live connection (nil in root mode)
-	muxReader   *mux.Reader   // nil in root mode
-	muxWriter   *mux.Writer   // nil in root mode
-	version     int
-	digest      string
-	moduleName  string
-	connectFunc func(string) (io.ReadWriter, error) // for root mode, creates connections on-demand
-	prevNdx     int32                               // tracks previous positive NDX for compressed delta encoding
+	client           *Client
+	rw               io.ReadWriter // live connection (nil in root mode)
+	muxReader        *mux.Reader   // nil in root mode
+	muxWriter        *mux.Writer   // nil in root mode
+	version          int
+	digest           string
+	moduleName       string
+	connectFunc      func(string) (io.ReadWriter, error) // for root mode, creates connections on-demand
+	prevNdx          int32                               // tracks previous positive NDX for compressed delta encoding
+	varintFlistFlags bool                                // true when CF_VARINT_FLIST_FLAGS is negotiated
 }
 
 var _ fs.FS = (*Session)(nil) // compile-time interface check
@@ -184,7 +203,7 @@ func (c Client) Connect(rw io.ReadWriter) (*Session, error) {
 			return nil, fmt.Errorf("decode auth challenge: %w", err)
 		}
 
-		responseHash, err := c.AuthResponse(challenge, digest)
+		responseHash, err := c.AuthResponse(digest, challenge)
 		if err != nil {
 			return nil, fmt.Errorf("compute auth response: %w", err)
 		}
@@ -239,6 +258,16 @@ func (c Client) Connect(rw io.ReadWriter) (*Session, error) {
 		return nil, fmt.Errorf("send local protocol version: %w", err)
 	}
 
+	// --- Compat Flags Exchange (proto >= 30) ---
+	// server sends resolved compat flags as varint
+	if s.version >= 30 {
+		compatFlags, err := protocol.ReadVarint(rw)
+		if err != nil {
+			return nil, fmt.Errorf("read compat flags: %w", err)
+		}
+		s.varintFlistFlags = (compatFlags & cfVarintFlistFlags) != 0
+	}
+
 	// --- Switch to multiplexed I/O ---
 
 	s.muxReader = mux.NewReader(rw)
@@ -262,11 +291,7 @@ func (c Client) OpenRoot() (*Session, error) {
 
 	c.applyDefaults()
 
-	// do a greeting exchange to negotiate version/digest, then close the connection
-	// this gives us the negotiated params without holding a live connection
-	//
-	// TODO for now, skip the greeting probe and just use the configured defaults
-	// a proper implementation would open a connection, do greeting exchange, then close
+	// no greeting probe needed: every FS operation (#list, module Open) opens its own fresh connection and does a full greeting exchange + negotiation anyway. probing here would just add an extra round-trip to learn what we'll re-learn on the next connection
 
 	return &Session{
 		client:      &c,
@@ -348,8 +373,13 @@ func doListRequest(connectFunc func(string) (io.ReadWriter, error), greet protoc
 
 // sendArguments sends the rsync command-line arguments to the server.
 func (s *Session) sendArguments(version int) error {
-	// minimal arguments: just "." (current directory)
 	args := []string{"."}
+
+	// advertise compat feature flags via -e argument (proto >= 30)
+	// "e0v" means subprotocol=0 with 'v' flag (CF_VARINT_FLIST_FLAGS)
+	if version >= 30 {
+		args = append(args, "e0v")
+	}
 
 	var terminator byte = 0
 	if version < 30 {

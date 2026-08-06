@@ -307,7 +307,7 @@ func TestClientConnect_Options(t *testing.T) {
 	client := &Client{
 		Module:       "mymod",
 		AuthUser:     "alice",
-		AuthResponse: func(challenge []byte, digest string) ([]byte, error) { return []byte("hash"), nil },
+		AuthResponse: func(digest string, challenge []byte) ([]byte, error) { return []byte("hash"), nil },
 		Greeting:     protocol.Greeting{Version: 28, SubProtocol: 0, Digests: []string{"md4"}},
 	}
 
@@ -487,4 +487,62 @@ func TestClientSession_OpenRootMode_NotImplemented(t *testing.T) {
 	if err == nil {
 		t.Error("expected error from unimplemented module open in root mode")
 	}
+}
+
+func TestComputeAuthHash(t *testing.T) {
+	tests := []struct {
+		name      string
+		password  string
+		challenge []byte
+		digest    string
+		wantLen   int
+	}{
+		{
+			name:      "md5 basic",
+			password:  "secret",
+			challenge: []byte("challenge"),
+			digest:    "md5",
+			wantLen:   16,
+		},
+		{
+			name:      "md4 basic",
+			password:  "secret",
+			challenge: []byte("challenge"),
+			digest:    "md4",
+			wantLen:   16,
+		},
+		{
+			name:      "md5 empty password",
+			password:  "",
+			challenge: []byte("challenge"),
+			digest:    "md5",
+			wantLen:   16,
+		},
+		{
+			name:      "md4 empty challenge",
+			password:  "secret",
+			challenge: []byte{},
+			digest:    "md4",
+			wantLen:   16,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hash, err := computeAuthHash(tt.digest, tt.password, tt.challenge)
+			if err != nil {
+				t.Fatalf("computeAuthHash(%q, %q, %q) error: %v", tt.digest, tt.password, tt.challenge, err)
+			}
+			if len(hash) != tt.wantLen {
+				t.Errorf("computeAuthHash(%q, %q, %q) len = %d, want %d", tt.digest, tt.password, tt.challenge, len(hash), tt.wantLen)
+			}
+		})
+	}
+
+	t.Run("unsupported digest", func(t *testing.T) {
+		_, err := computeAuthHash("blake3", "password", []byte("challenge"))
+		if err == nil {
+			t.Fatal("expected error for unsupported digest, got nil")
+		}
+	})
 }

@@ -195,6 +195,14 @@ func TestHandleConnection_AuthSuccess(t *testing.T) {
 	// send client protocol version response
 	clientConn.Write(protoVersionBytes(32))
 
+	// read compat flags (varint, proto >= 30)
+	buf = make([]byte, 4)
+	n, err = clientConn.Read(buf)
+	if err != nil {
+		t.Fatalf("failed to read compat flags: %v", err)
+	}
+	_ = buf[:n] // compat flags varint (value 0x80 for CF_VARINT_FLIST_FLAGS)
+
 	if err := <-errChan; err != nil {
 		t.Fatalf("Handshake failed: %v", err)
 	}
@@ -335,5 +343,78 @@ func TestHandleConnection_VersionDowngrade(t *testing.T) {
 
 	if res.Version != 28 {
 		t.Errorf("Expected downgraded version 28, got %d", res.Version)
+	}
+}
+
+func TestHandleConnection_CompatFlagsWithEArg(t *testing.T) {
+	// client sends -e argument with 'v' flag, server should negotiate CF_VARINT_FLIST_FLAGS
+	mod := &ServerModule{Name: "testmod", Comment: "Test Module"}
+	s, _ := NewServer(mod)
+
+	// arguments include "e0v" (subprotocol=0, 'v' flag for CF_VARINT_FLIST_FLAGS)
+	rw := &mockRW{
+		readBuf:  bytes.NewBuffer(append([]byte("@RSYNCD: 32.0 md5\ntestmod\n.\x00e0v\x00\x00"), protoVersionBytes(32)...)),
+		writeBuf: new(bytes.Buffer),
+	}
+
+	opts := HandleOptions{
+		LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
+	}
+
+	res, err := s.HandleConnection(rw, opts)
+	if err != nil {
+		t.Fatalf("Handshake failed: %v", err)
+	}
+
+	if !res.VarintFlistFlags {
+		t.Error("Expected VarintFlistFlags to be true when client advertises 'v' flag")
+	}
+}
+
+func TestHandleConnection_CompatFlagsWithoutEArg(t *testing.T) {
+	// client doesn't send -e argument, server should not set CF_VARINT_FLIST_FLAGS
+	mod := &ServerModule{Name: "testmod", Comment: "Test Module"}
+	s, _ := NewServer(mod)
+
+	rw := &mockRW{
+		readBuf:  bytes.NewBuffer(append([]byte("@RSYNCD: 32.0 md5\ntestmod\n.\x00\x00"), protoVersionBytes(32)...)),
+		writeBuf: new(bytes.Buffer),
+	}
+
+	opts := HandleOptions{
+		LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
+	}
+
+	res, err := s.HandleConnection(rw, opts)
+	if err != nil {
+		t.Fatalf("Handshake failed: %v", err)
+	}
+
+	if res.VarintFlistFlags {
+		t.Error("Expected VarintFlistFlags to be false when client doesn't advertise 'v' flag")
+	}
+}
+
+func TestHandleConnection_CompatFlagsNotSentForOldProtocol(t *testing.T) {
+	// proto < 30 should not send compat flags
+	mod := &ServerModule{Name: "testmod", Comment: "Test Module"}
+	s, _ := NewServer(mod)
+
+	rw := &mockRW{
+		readBuf:  bytes.NewBuffer(append([]byte("@RSYNCD: 29.0 md5\ntestmod\narg\n\n"), protoVersionBytes(29)...)),
+		writeBuf: new(bytes.Buffer),
+	}
+
+	opts := HandleOptions{
+		LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
+	}
+
+	res, err := s.HandleConnection(rw, opts)
+	if err != nil {
+		t.Fatalf("Handshake failed: %v", err)
+	}
+
+	if res.VarintFlistFlags {
+		t.Error("Expected VarintFlistFlags to be false for proto < 30")
 	}
 }

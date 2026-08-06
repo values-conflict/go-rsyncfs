@@ -37,7 +37,7 @@ func setupTestServer(t *testing.T, mod *ServerModule, handleFiles bool) net.Conn
 
 		// send file list
 		mw := mux.NewWriter(serverConn)
-		if err := sendFileList(mw, result.Module.FS, ".", result.Version, false); err != nil {
+		if err := sendFileList(mw, result.Module.FS, ".", result.Version, result.VarintFlistFlags); err != nil {
 			return
 		}
 
@@ -405,7 +405,7 @@ func TestClientOpen_RootModuleFileAccess(t *testing.T) {
 
 				mw := mux.NewWriter(serverConn)
 				mr := mux.NewReader(serverConn)
-				if err := sendFileList(mw, result.Module.FS, ".", result.Version, false); err != nil {
+				if err := sendFileList(mw, result.Module.FS, ".", result.Version, result.VarintFlistFlags); err != nil {
 					return
 				}
 
@@ -482,7 +482,7 @@ func TestFlistReader_BasicEntry(t *testing.T) {
 	}
 	buf.WriteByte(0)
 
-	flr := newFlistReader(buf.Bytes(), 30)
+	flr := newFlistReader(buf.Bytes(), 30, false)
 	entry, err := flr.readEntry(0)
 	if err != nil {
 		t.Fatalf("readEntry failed: %v", err)
@@ -663,5 +663,67 @@ func TestWriteSelector_ItemFlags(t *testing.T) {
 	want = []byte{0, 0, 0, 0} // plain int32 LE for ndx=0
 	if !bytes.Equal(got, want) {
 		t.Errorf("writeSelector(proto=28) = %v, want %v", got, want)
+	}
+}
+
+func TestFlistReader_VarintXflags(t *testing.T) {
+	var buf bytes.Buffer
+
+	// varint xflags: XMIT_TOP_DIR | XMIT_EXTENDED_FLAGS = 5, encoded as varint
+	// varint(5) = single byte 0x05
+	if err := protocol.WriteVarint(&buf, 5); err != nil {
+		t.Fatalf("WriteVarint: %v", err)
+	}
+
+	// name: prefixLen=0 (no SAME_NAME), suffixLen=8, "file.txt"
+	buf.WriteByte(8)
+	buf.WriteString("file.txt")
+
+	// size: varlong(12, 3)
+	if err := protocol.WriteVarlong(&buf, 12, 3); err != nil {
+		t.Fatalf("WriteVarlong: %v", err)
+	}
+
+	// mtime: varlong(1000000, 4)
+	if err := protocol.WriteVarlong(&buf, 1000000, 4); err != nil {
+		t.Fatalf("WriteVarlong: %v", err)
+	}
+
+	// mode: int32 LE
+	if err := writeIntLE(&buf, 0o100644, 4); err != nil {
+		t.Fatalf("writeIntLE: %v", err)
+	}
+
+	// uid: varint(0)
+	if err := protocol.WriteVarint(&buf, 0); err != nil {
+		t.Fatalf("WriteVarint: %v", err)
+	}
+
+	// gid: varint(0)
+	if err := protocol.WriteVarint(&buf, 0); err != nil {
+		t.Fatalf("WriteVarint: %v", err)
+	}
+
+	// end-of-list: varint sentinel for zero xflags (XMIT_EXTENDED_FLAGS = 4)
+	if err := protocol.WriteVarint(&buf, 4); err != nil {
+		t.Fatalf("WriteVarint: %v", err)
+	}
+
+	flr := newFlistReader(buf.Bytes(), 32, true) // varintFlistFlags=true
+	entry, err := flr.readEntry(0)
+	if err != nil {
+		t.Fatalf("readEntry failed: %v", err)
+	}
+
+	if entry.name != "file.txt" {
+		t.Errorf("name = %q, want %q", entry.name, "file.txt")
+	}
+	if entry.size != 12 {
+		t.Errorf("size = %d, want 12", entry.size)
+	}
+
+	_, err = flr.readEntry(1)
+	if err != io.EOF {
+		t.Errorf("expected EOF at end-of-list, got: %v", err)
 	}
 }

@@ -31,18 +31,20 @@ type flistReader struct {
 	r       *bytes.Reader
 	version int
 	// delta-encoding state
-	lastMode  fs.FileMode
-	lastUID   int32
-	lastGID   int32
-	lastMtime int64
-	lastName  string
+	lastMode         fs.FileMode
+	lastUID          int32
+	lastGID          int32
+	lastMtime        int64
+	lastName         string
+	varintFlistFlags bool
 }
 
 // newFlistReader creates a reader for parsing file list data.
-func newFlistReader(data []byte, version int) *flistReader {
+func newFlistReader(data []byte, version int, varintFlistFlags bool) *flistReader {
 	return &flistReader{
-		r:       bytes.NewReader(data),
-		version: version,
+		r:                bytes.NewReader(data),
+		version:          version,
+		varintFlistFlags: varintFlistFlags,
 	}
 }
 
@@ -162,8 +164,18 @@ func (fr *flistReader) readEntry(index int) (*fileListEntry, error) {
 
 // readXflags reads the xmit flags from the stream.
 func (fr *flistReader) readXflags() (int, error) {
-	// for now, assume basic byte encoding (matches our server's default behavior)
-	// TODO support varint xflags when CF_VARINT_FLIST_FLAGS is negotiated
+	if fr.varintFlistFlags {
+		v, err := protocol.ReadVarint(fr.r)
+		if err != nil {
+			return 0, err
+		}
+		// varint encoding uses XMIT_EXTENDED_FLAGS as a sentinel for zero
+		if v == xmitExtendedFlags {
+			return 0, nil
+		}
+		return int(v), nil
+	}
+
 	b, err := fr.r.ReadByte()
 	if err != nil {
 		return 0, err
@@ -257,7 +269,7 @@ func (s *Session) readFileList() ([]fileListEntry, error) {
 		return nil, fmt.Errorf("expected MSG_DATA for file list, got code %d", code)
 	}
 
-	flr := newFlistReader(payload, s.version)
+	flr := newFlistReader(payload, s.version, s.varintFlistFlags)
 	var entries []fileListEntry
 	index := 0
 

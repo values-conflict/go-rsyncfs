@@ -11,11 +11,25 @@ import (
 	"github.com/values-conflict/go-rsyncfs/protocol"
 )
 
+// compat flag bits matching upstream rsync compat_flags
+const (
+	cfIncRecurse        = 1 << 0 // 'i'
+	cfSymlinkTimes      = 1 << 1 // 'L'
+	cfSymlinkIconv      = 1 << 2 // 's'
+	cfSafeFlist         = 1 << 3 // 'f'
+	cfAvoidXattrOptim   = 1 << 4 // 'x'
+	cfChksumSeedFix     = 1 << 5 // 'C'
+	cfInplacePartialDir = 1 << 6 // 'I'
+	cfVarintFlistFlags  = 1 << 7 // 'v'
+	cfId0Names          = 1 << 8 // 'u'
+)
+
 // HandshakeResult contains the outcome of a successful server handshake.
 type HandshakeResult struct {
-	Module  *ServerModule
-	Version int
-	Digest  string
+	Module           *ServerModule
+	Version          int
+	Digest           string
+	VarintFlistFlags bool // true when CF_VARINT_FLIST_FLAGS is negotiated
 }
 
 // HandleOptions provides configuration for handling a connection's handshake.
@@ -64,6 +78,11 @@ Loop:
 	for {
 		line, err := readLine(rw)
 		if err != nil {
+			if err == io.EOF {
+				// client disconnected after greeting exchange
+				// treat as clean disconnect rather than an error
+				return nil, nil
+			}
 			return nil, fmt.Errorf("failed to read module request: %w", err)
 		}
 		line = bytes.TrimSpace(line)
@@ -148,7 +167,11 @@ Loop:
 		return nil, fmt.Errorf("failed to read arguments: %w", err)
 	}
 
-	_ = args // mark as used for now until we need them in HandshakeResult
+	// extract client_info from -e argument (proto >= 30)
+	var clientInfo string
+	if version >= 30 {
+		clientInfo = extractClientInfo(args)
+	}
 
 	// --- Phase 4: Protocol Version Exchange (binary) ---
 	// server sends its protocol version as int32 LE
@@ -167,10 +190,24 @@ Loop:
 		version = clientProto
 	}
 
+	// --- Compat Flags Exchange (proto >= 30) ---
+	// resolve compat flags based on server capabilities and client's advertised features
+	var compatFlags int
+	if version >= 30 {
+		compatFlags = resolveCompatFlags(clientInfo)
+		// send compat flags as varint
+		if err := protocol.WriteVarint(rw, int32(compatFlags)); err != nil {
+			return nil, fmt.Errorf("failed to send compat flags: %w", err)
+		}
+	}
+
+	varintFlistFlags := (compatFlags & cfVarintFlistFlags) != 0
+
 	return &HandshakeResult{
-		Module:  selectedModule,
-		Version: version,
-		Digest:  digest,
+		Module:           selectedModule,
+		Version:          version,
+		Digest:           digest,
+		VarintFlistFlags: varintFlistFlags,
 	}, nil
 }
 
@@ -234,4 +271,47 @@ func readDelimitedArgs(rw io.Reader, delim byte) ([]string, error) {
 	}
 
 	return args, nil
+}
+
+// extractClientInfo extracts the client_info string from the -e argument.
+// The format is "e<version_sub><flags>" where flags are single characters.
+func extractClientInfo(args []string) string {
+	for _, arg := range args {
+		if len(arg) >= 2 && arg[0] == 'e' {
+			return arg[1:]
+		}
+	}
+	return ""
+}
+
+// resolveCompatFlags builds the server's compat flags based on its capabilities
+// and the client's advertised feature flags in clientInfo.
+func resolveCompatFlags(clientInfo string) int {
+	flags := 0
+
+	// server supports CF_VARINT_FLIST_FLAGS when the client advertises 'v'
+	for _, ch := range clientInfo {
+		switch ch {
+		case 'i':
+			flags |= cfIncRecurse
+		case 'L':
+			flags |= cfSymlinkTimes
+		case 's':
+			flags |= cfSymlinkIconv
+		case 'f':
+			flags |= cfSafeFlist
+		case 'x':
+			flags |= cfAvoidXattrOptim
+		case 'C':
+			flags |= cfChksumSeedFix
+		case 'I':
+			flags |= cfInplacePartialDir
+		case 'v':
+			flags |= cfVarintFlistFlags
+		case 'u':
+			flags |= cfId0Names
+		}
+	}
+
+	return flags
 }
