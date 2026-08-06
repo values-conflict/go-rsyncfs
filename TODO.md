@@ -9,3 +9,7 @@
 - verify all comments match the appropriate/correct format
 
 - should we summarize the relevant tianonfmt rules here somewhere so they're easier/quicker to reference?  maybe make the upstream tianonfmt docs themselves tighter somehow?
+
+- create explicit `Example` functions that demonstrate how to create a TCP-based rsync `Server` and/or `Client`
+
+- can we somehow get creative with the `net.Pipe` usage / tests to avoid the goroutines entirely?
