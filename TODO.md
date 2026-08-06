@@ -3,6 +3,8 @@
 - verify implementation of Task 9 is completely correct
 
 - verify that all code / tasks have appropriate tests
+  - for example, `PasswordAuth` does not
+  - a task is not complete until all the code has meaningful tests
 
 - close the "Known Gaps" in our implementation, remove them from the plan, and expressly forbid leaving "known gaps" in the future
 
