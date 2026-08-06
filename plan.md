@@ -419,7 +419,7 @@ func (s *Session) Open(name string) (fs.File, error)
 
 These are features that are partially implemented or stubbed but not yet functional:
 
-- **Auth hash computation:** `computeAuthHash()` in `client.go` returns an error (TODO). Authentication cannot actually succeed until md4/md5 digest computation is implemented.
+- **Auth hash computation:** `computeAuthHash()` in `client.go` returns an error (TODO).  Authentication cannot actually succeed until md4/md5 digest computation is implemented.
 - **Compat flags negotiation:** The `-e` option mechanism for negotiating `CF_VARINT_FLIST_FLAGS` and other compat flags is not implemented.  `sendFileList` accepts a `varintFlistFlags` parameter but it is always `false`.  Client-side flist reader does not support varint xflags.
 - **Root mode greeting probe:** `OpenRoot()` skips the greeting exchange and uses configured defaults for version/digest.  A proper implementation would do a live greeting exchange.
 
