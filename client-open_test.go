@@ -505,7 +505,9 @@ func TestFlistReader_BasicEntry(t *testing.T) {
 	if err := protocol.WriteVarlong(&buf, 1000000, 4); err != nil {
 		t.Fatalf("WriteVarlong: %v", err)
 	}
-	writeInt32(&buf, int32(0o100644))
+	if err := writeIntLE(&buf, 0o100644, 4); err != nil {
+		t.Fatalf("writeIntLE: %v", err)
+	}
 	if err := protocol.WriteVarint(&buf, 0); err != nil {
 		t.Fatalf("WriteVarint: %v", err)
 	}

@@ -30,12 +30,6 @@ const (
 	xmitSameAtime     = 1 << 14
 )
 
-// end-of-list index markers
-const (
-	ndxDone     = -1
-	ndxFlistEof = -2
-)
-
 // fileEntry holds the stat-like info extracted from an fs.DirEntry for wire encoding.
 type fileEntry struct {
 	name       string
@@ -112,7 +106,7 @@ func sendFileList(w *mux.Writer, rootFS fs.FS, basePath string, version int, var
 		// uid (always sent for non-matching, default 0)
 		curUID := int32(0)
 		if xflags&xmitSameUID == 0 {
-			if err := writeUID(buf, curUID, version); err != nil {
+			if err := writeID(buf, curUID, version); err != nil {
 				return fmt.Errorf("write uid for %s: %w", entry.name, err)
 			}
 		}
@@ -120,7 +114,7 @@ func sendFileList(w *mux.Writer, rootFS fs.FS, basePath string, version int, var
 		// gid (always sent for non-matching, default 0)
 		curGID := int32(0)
 		if xflags&xmitSameGID == 0 {
-			if err := writeGID(buf, curGID, version); err != nil {
+			if err := writeID(buf, curGID, version); err != nil {
 				return fmt.Errorf("write gid for %s: %w", entry.name, err)
 			}
 		}
@@ -269,7 +263,7 @@ func writeXflags(w io.Writer, xflags int, mode fs.FileMode, version int, varintF
 		}
 		if (xflags&0xFF00 != 0) || xflags == 0 {
 			xflags |= xmitExtendedFlags
-			return writeShortint(w, uint16(xflags))
+			return writeIntLE(w, uint32(xflags), 2)
 		}
 		_, err := w.Write([]byte{byte(xflags)})
 		return err
@@ -288,10 +282,16 @@ func writeXflags(w io.Writer, xflags int, mode fs.FileMode, version int, varintF
 	return err
 }
 
-// writeShortint writes a 16-bit unsigned integer in little-endian byte order.
-func writeShortint(w io.Writer, x uint16) error {
-	b := [2]byte{byte(x), byte(x >> 8)}
-	_, err := w.Write(b[:])
+// writeIntLE writes an integer in little-endian byte order.
+func writeIntLE(w io.Writer, v uint32, size int) error {
+	b := make([]byte, size)
+	switch size {
+	case 2:
+		binary.LittleEndian.PutUint16(b, uint16(v))
+	case 4:
+		binary.LittleEndian.PutUint32(b, v)
+	}
+	_, err := w.Write(b)
 	return err
 }
 
@@ -308,14 +308,12 @@ func writeMtime(w io.Writer, mtime int64, version int) error {
 	if version >= 30 {
 		return protocol.WriteVarlong(w, mtime, 4)
 	}
-	// proto < 30: int32 LE
-	return writeInt32(w, int32(mtime))
+	return writeIntLE(w, uint32(mtime), 4)
 }
 
 // writeMode writes the file mode as a 32-bit little-endian integer.
 // The mode is sent as-is (matching to_wire_mode which is identity on Linux).
 func writeMode(w io.Writer, mode fs.FileMode) error {
-	// convert fs.FileMode to Unix-style mode with type bits
 	unixMode := uint32(mode.Perm())
 	switch {
 	case mode.IsDir():
@@ -325,23 +323,15 @@ func writeMode(w io.Writer, mode fs.FileMode) error {
 	default:
 		unixMode |= 0o100000 // S_IFREG
 	}
-	return writeInt32(w, int32(unixMode))
+	return writeIntLE(w, unixMode, 4)
 }
 
-// writeUID writes the uid in the appropriate format.
-func writeUID(w io.Writer, uid int32, version int) error {
+// writeID writes an id (uid or gid) in the appropriate format for the protocol version.
+func writeID(w io.Writer, id int32, version int) error {
 	if version >= 30 {
-		return protocol.WriteVarint(w, uid)
+		return protocol.WriteVarint(w, id)
 	}
-	return writeInt32(w, uid)
-}
-
-// writeGID writes the gid in the appropriate format.
-func writeGID(w io.Writer, gid int32, version int) error {
-	if version >= 30 {
-		return protocol.WriteVarint(w, gid)
-	}
-	return writeInt32(w, gid)
+	return writeIntLE(w, uint32(id), 4)
 }
 
 // writeSymlinkTarget writes the symlink target length and data.
@@ -362,17 +352,10 @@ func writeEndMarker(w io.Writer) error {
 // writeNdxDone writes the compressed NDX_DONE marker.
 func writeNdxDone(w io.Writer, version int) error {
 	if version < 30 {
-		return writeInt32(w, ndxDone)
+		// NDX_DONE as int32 LE is 0xFFFFFFFF
+		_, err := w.Write([]byte{0xFF, 0xFF, 0xFF, 0xFF})
+		return err
 	}
-	// compressed ndx: single byte 0x00 means NDX_DONE
 	_, err := w.Write([]byte{0})
-	return err
-}
-
-// writeInt32 writes a 32-bit signed integer in little-endian byte order.
-func writeInt32(w io.Writer, x int32) error {
-	var b [4]byte
-	binary.LittleEndian.PutUint32(b[:], uint32(x))
-	_, err := w.Write(b[:])
 	return err
 }

@@ -125,7 +125,7 @@ func (fr *flistReader) readEntry(index int) (*fileListEntry, error) {
 
 	// uid
 	if xflags&xmitSameUID == 0 {
-		_, err := fr.readUID()
+		_, err := fr.readID()
 		if err != nil {
 			return nil, fmt.Errorf("read uid: %w", err)
 		}
@@ -133,7 +133,7 @@ func (fr *flistReader) readEntry(index int) (*fileListEntry, error) {
 
 	// gid
 	if xflags&xmitSameGID == 0 {
-		_, err := fr.readGID()
+		_, err := fr.readID()
 		if err != nil {
 			return nil, fmt.Errorf("read gid: %w", err)
 		}
@@ -233,20 +233,8 @@ func (fr *flistReader) readMode() (fs.FileMode, error) {
 	return fm, nil
 }
 
-// readUID reads the uid in the appropriate format.
-func (fr *flistReader) readUID() (int32, error) {
-	if fr.version >= 30 {
-		return protocol.ReadVarint(fr.r)
-	}
-	b := make([]byte, 4)
-	if _, err := io.ReadFull(fr.r, b); err != nil {
-		return 0, err
-	}
-	return int32(binary.LittleEndian.Uint32(b)), nil
-}
-
-// readGID reads the gid in the appropriate format.
-func (fr *flistReader) readGID() (int32, error) {
+// readID reads an id (uid or gid) in the appropriate format for the protocol version.
+func (fr *flistReader) readID() (int32, error) {
 	if fr.version >= 30 {
 		return protocol.ReadVarint(fr.r)
 	}
@@ -295,60 +283,39 @@ func (s *Session) readFileList() ([]fileListEntry, error) {
 // Implements the upstream write_ndx() algorithm from io.c.
 func writeNdx(w io.Writer, ndx int, version int, prevNdx *int32) error {
 	if version < 30 {
-		// proto < 30: plain int32 LE
-		var b [4]byte
-		binary.LittleEndian.PutUint32(b[:], uint32(ndx))
-		_, err := w.Write(b[:])
-		return err
+		return writeIntLE(w, uint32(int32(ndx)), 4)
 	}
-
-	// compressed NDX for proto >= 30
-	if ndx == -1 { // NDX_DONE
+	if ndx == -1 {
 		_, err := w.Write([]byte{0})
 		return err
 	}
 
+	var prefix byte
+	absNdx := ndx
+	if ndx < 0 {
+		prefix = 0xFF
+		absNdx = -ndx
+	}
+	diff := int32(absNdx) - *prevNdx
+	*prevNdx = int32(absNdx)
+
 	var buf []byte
-	if ndx >= 0 {
-		diff := int32(ndx) - *prevNdx
-		*prevNdx = int32(ndx)
-
-		// diff of 1-253: single byte
-		if diff >= 1 && diff <= 253 {
-			buf = []byte{byte(diff)}
-		} else if diff >= 0 && diff <= 0x7FFF {
-			// diff of 0 or 254-32767: 0xFE prefix + 2-byte big-endian diff
-			buf = []byte{0xFE, byte(diff >> 8), byte(diff)}
-		} else {
-			// diff < 0 or diff > 32767: 0xFE prefix + 4 bytes of ndx with high bit set
-			// byte order: (ndx>>24)|0x80, ndx&0xFF, (ndx>>8)&0xFF, (ndx>>16)&0xFF
-			buf = []byte{
-				0xFE,
-				byte((ndx >> 24) | 0x80),
-				byte(ndx),
-				byte(ndx >> 8),
-				byte(ndx >> 16),
-			}
+	switch {
+	case diff >= 1 && diff <= 253:
+		buf = []byte{prefix, byte(diff)}
+	case diff >= 0 && diff <= 0x7FFF:
+		buf = []byte{prefix, 0xFE, byte(diff >> 8), byte(diff)}
+	default:
+		buf = []byte{
+			prefix, 0xFE,
+			byte((absNdx >> 24) | 0x80),
+			byte(absNdx),
+			byte(absNdx >> 8),
+			byte(absNdx >> 16),
 		}
-	} else {
-		// negative index: 0xFF prefix, then encode -ndx using same diff rules
-		negNdx := -ndx
-		diff := int32(negNdx) - *prevNdx
-		*prevNdx = int32(negNdx)
-
-		if diff >= 1 && diff <= 253 {
-			buf = []byte{0xFF, byte(diff)}
-		} else if diff >= 0 && diff <= 0x7FFF {
-			buf = []byte{0xFF, 0xFE, byte(diff >> 8), byte(diff)}
-		} else {
-			buf = []byte{
-				0xFF, 0xFE,
-				byte((negNdx >> 24) | 0x80),
-				byte(negNdx),
-				byte(negNdx >> 8),
-				byte(negNdx >> 16),
-			}
-		}
+	}
+	if prefix == 0 {
+		buf = buf[1:] // strip prefix byte for positive indices
 	}
 
 	_, err := w.Write(buf)

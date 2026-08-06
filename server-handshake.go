@@ -139,11 +139,9 @@ Loop:
 
 	var args []string
 	if version >= 30 {
-		// null-terminated arguments
-		args, err = readNullTerminatedArgs(rw)
+		args, err = readDelimitedArgs(rw, 0)
 	} else {
-		// newline-terminated arguments
-		args, err = readNewlineTerminatedArgs(rw)
+		args, err = readDelimitedArgs(rw, '\n')
 	}
 
 	if err != nil {
@@ -178,8 +176,6 @@ Loop:
 
 func (s *Server) sendModuleList(rw io.Writer) error {
 	for name, mod := range s.modules {
-		// format: <name>           <comment>\n
-		// name left-padded to 15 chars + tab + comment
 		line := fmt.Sprintf("%-15s\t%s\n", name, mod.Comment)
 		if _, err := rw.Write([]byte(line)); err != nil {
 			return err
@@ -206,11 +202,11 @@ func readLine(rw io.Reader) ([]byte, error) {
 	return buf, nil
 }
 
-// readNullTerminatedArgs reads arguments until double null.
-func readNullTerminatedArgs(rw io.Reader) ([]string, error) {
+// readDelimitedArgs reads arguments from rw until a double delimiter is encountered.
+func readDelimitedArgs(rw io.Reader, delim byte) ([]string, error) {
 	var args []string
 	var currentArg []byte
-	lastWasNull := false
+	lastWasDelim := false
 
 	b := make([]byte, 1)
 	for {
@@ -218,55 +214,17 @@ func readNullTerminatedArgs(rw io.Reader) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		if b[0] == '\x00' {
-			if lastWasNull {
-				// double null encountered: end of arguments
+		if b[0] == delim {
+			if lastWasDelim {
 				break
 			}
-			lastWasNull = true
-			if len(currentArg) > 0 {
-				args = append(args, string(currentArg))
-				currentArg = nil
-			} else if len(args) == 0 {
-				// empty first arg -- rsync normally sends "." here
-			}
-		} else {
-			lastWasNull = false
-			currentArg = append(currentArg, b[0])
-		}
-	}
-
-	if len(currentArg) > 0 {
-		args = append(args, string(currentArg))
-	}
-
-	return args, nil
-}
-
-// readNewlineTerminatedArgs reads arguments until double newline.
-func readNewlineTerminatedArgs(rw io.Reader) ([]string, error) {
-	var args []string
-	var currentArg []byte
-	lastWasNewline := false
-
-	b := make([]byte, 1)
-	for {
-		_, err := rw.Read(b)
-		if err != nil {
-			return nil, err
-		}
-		if b[0] == '\n' {
-			if lastWasNewline {
-				// double newline encountered: end of arguments
-				break
-			}
-			lastWasNewline = true
+			lastWasDelim = true
 			if len(currentArg) > 0 {
 				args = append(args, string(currentArg))
 				currentArg = nil
 			}
 		} else {
-			lastWasNewline = false
+			lastWasDelim = false
 			currentArg = append(currentArg, b[0])
 		}
 	}

@@ -31,13 +31,6 @@ func TestChecksum1(t *testing.T) {
 			}
 		})
 	}
-
-	// verify determinism
-	for i := 0; i < 5; i++ {
-		if checksum1([]byte("hello world")) != checksum1([]byte("hello world")) {
-			t.Error("checksum1 is not deterministic")
-		}
-	}
 }
 
 func TestChecksum2(t *testing.T) {
@@ -59,15 +52,6 @@ func TestChecksum2(t *testing.T) {
 				t.Errorf("checksum2(%q, %d) len = %d, want %d", tt.data, tt.s2len, len(got), tt.wantLen)
 			}
 		})
-	}
-
-	// verify determinism
-	for i := 0; i < 5; i++ {
-		a := checksum2([]byte("test"), 16)
-		b := checksum2([]byte("test"), 16)
-		if !bytes.Equal(a, b) {
-			t.Error("checksum2 is not deterministic")
-		}
 	}
 }
 

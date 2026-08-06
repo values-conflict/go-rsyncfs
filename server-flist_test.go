@@ -253,29 +253,26 @@ func TestCommonPrefixLen(t *testing.T) {
 	}
 }
 
-func TestWriteInt32(t *testing.T) {
-	var buf bytes.Buffer
-	err := writeInt32(&buf, 0x01020304)
-	if err != nil {
-		t.Fatalf("writeInt32 failed: %v", err)
+func TestWriteIntLE(t *testing.T) {
+	tests := []struct {
+		name string
+		val  uint32
+		size int
+		want []byte
+	}{
+		{"int32", 0x01020304, 4, []byte{0x04, 0x03, 0x02, 0x01}},
+		{"int16", 0x0102, 2, []byte{0x02, 0x01}},
 	}
-	got := buf.Bytes()
-	want := []byte{0x04, 0x03, 0x02, 0x01} // little-endian
-	if !bytes.Equal(got, want) {
-		t.Errorf("writeInt32(0x01020304) = %v, want %v", got, want)
-	}
-}
-
-func TestWriteShortint(t *testing.T) {
-	var buf bytes.Buffer
-	err := writeShortint(&buf, 0x0102)
-	if err != nil {
-		t.Fatalf("writeShortint failed: %v", err)
-	}
-	got := buf.Bytes()
-	want := []byte{0x02, 0x01} // little-endian
-	if !bytes.Equal(got, want) {
-		t.Errorf("writeShortint(0x0102) = %v, want %v", got, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := writeIntLE(&buf, tt.val, tt.size); err != nil {
+				t.Fatalf("writeIntLE failed: %v", err)
+			}
+			if !bytes.Equal(buf.Bytes(), tt.want) {
+				t.Errorf("writeIntLE(0x%08x, %d) = %v, want %v", tt.val, tt.size, buf.Bytes(), tt.want)
+			}
+		})
 	}
 }
 
