@@ -8,9 +8,9 @@ This document is intentionally project-generic so it can be reused across Go pro
 
 Go is opinionated by design.  Fighting the language costs more than it saves.  When something feels awkward in Go -- wrapping every return in a result type, adding a base class, injecting a logger into every struct -- that friction is usually a signal to reconsider the approach, not to push through.
 
-**Simple over clever.** Code is read far more than it is written.  A boring solution that a newcomer can read in 30 seconds beats a sophisticated one that requires context to understand.
+**Simple over clever.**  Code is read far more than it is written.  A boring solution that a newcomer can read in 30 seconds beats a sophisticated one that requires context to understand.
 
-**Explicit over implicit.** Go has no magic.  No annotations that wire things together at runtime, no hidden inheritance chains, no framework lifecycle hooks.  When something happens, you can see it in the call stack.
+**Explicit over implicit.**  Go has no magic.  No annotations that wire things together at runtime, no hidden inheritance chains, no framework lifecycle hooks.  When something happens, you can see it in the call stack.
 
 ## Code Style
 
@@ -52,7 +52,7 @@ i++
 data = data[1:]
 ```
 
-Exported identifiers need doc comments (`// TypeName ...` or `// FuncName ...`). Unexported identifiers only need comments when the logic is subtle.
+Exported identifiers need doc comments (`// TypeName ...` or `// FuncName ...`).  Unexported identifiers only need comments when the logic is subtle.
 
 ## Design Principles
 
@@ -90,7 +90,7 @@ func Process(r io.Reader) (*Result, error)
 func NewClient(cfg Config) *Client
 ```
 
-**Connection-oriented code should accept `io.ReadWriter` or `net.Conn`.** When a library manages a protocol over a connection, the library should accept the connection as a parameter rather than creating it internally.  This lets callers control transport details (TCP, TLS, Unix sockets, etc.) and makes testing straightforward -- tests can pass a `net.Pipe` instead of spinning up real network listeners.  See the [`net.Pipe` testing pattern](#netpipe-for-testing-connection-oriented-code) below.
+**Connection-oriented code should accept `io.ReadWriter` or `net.Conn`.**  When a library manages a protocol over a connection, the library should accept the connection as a parameter rather than creating it internally.  This lets callers control transport details (TCP, TLS, Unix sockets, etc.) and makes testing straightforward -- tests can pass a `net.Pipe` instead of spinning up real network listeners.  See the [`net.Pipe` testing pattern](#netpipe-for-testing-connection-oriented-code) below.
 
 ### Compiler enforcement of interface satisfaction
 
@@ -128,7 +128,7 @@ type Cache struct {
 
 Zero-value usefulness: design structs so that `var x T` is valid and sensible.  `sync.Mutex`, `bytes.Buffer`, and `sync.WaitGroup` all work at zero value.  Reach for this where it makes initialization simpler.
 
-**Zero-value as "explicitly set" sentinel.** Add a separate `fooSet bool` field alongside a value *only* when the zero-value of the field is a legitimately set value.  When the zero-value unambiguously means "not set" -- empty string, nil pointer, zero for a counter that cannot meaningfully be zero -- the value itself carries that information and the bool is redundant noise.
+**Zero-value as "explicitly set" sentinel.**  Add a separate `fooSet bool` field alongside a value *only* when the zero-value of the field is a legitimately set value.  When the zero-value unambiguously means "not set" -- empty string, nil pointer, zero for a counter that cannot meaningfully be zero -- the value itself carries that information and the bool is redundant noise.
 
 ```go
 // Bad: bool is redundant because "" is never a valid hostname
@@ -143,7 +143,7 @@ type Config struct {
 }
 ```
 
-When the zero-value is a valid set value (e.g. `Timeout` of `0` meaning "no timeout"), you have two options:
+When the zero-value is a valid set value (eg, `Timeout` of `0` meaning "no timeout"), you have two options:
 
 - **`*T` (pointer)** -- `nil` means unset.  One field, self-documenting, no sync risk.  Costs a nil check and an indirection on every access.  Prefer for config structs constructed once and read many times.
 - **`T` + `fooSet bool`** -- direct value access, no nil checks, no allocation.  Costs a second field that can drift out of sync.  Prefer on hot paths, frequently copied structs, or where the struct must be comparable.
@@ -166,7 +166,7 @@ client, err := NewClient(Config{
 // Example: a base logger package + independent middleware packages each providing With*.
 ```
 
-**Fluent builders on the config type are discouraged but acceptable if they earn their weight.**  Methods on the configuration type (e.g. `Spec.ReadOnly()`, `Spec.AsOverlay()`) group naturally in godoc and work well with `.` autocomplete.  These are not the same as free-standing `With*` functional options -- they mutate and return the same struct value.
+**Fluent builders on the config type are discouraged but acceptable if they earn their weight.**  Methods on the configuration type (eg, `Spec.ReadOnly()`, `Spec.AsOverlay()`) group naturally in godoc and work well with `.` autocomplete.  These are not the same as free-standing `With*` functional options -- they mutate and return the same struct value.
 
 Avoid sub-packages for option types -- they hurt discoverability (callers must know the package name to find anything) and make interface satisfaction across packages painful.  Use a consistent naming prefix (`FooOptBar`) as the fallback when methods on a type are genuinely awkward.  Bare package-level functions in a large package are the worst option: they scatter alphabetically with unrelated functions and cannot be discovered by browsing.
 
@@ -248,7 +248,7 @@ Error strings are not sentences.  They are fragments that compose into a chain: 
 
 Define sentinel errors (`var ErrNotFound = errors.New("not found")`) for conditions callers need to check.  Define error types (`type ValidationError struct { ... }`) when callers need structured information.  Do not define error types just to add a message.
 
-Do not discard errors with `_` unless the error is genuinely irrelevant (e.g. closing a read-only file).  When you discard an error, add a comment explaining why.
+Do not discard errors with `_` unless the error is genuinely irrelevant (eg, closing a read-only file).  When you discard an error, add a comment explaining why.
 
 ### Library-first tooling
 
@@ -281,11 +281,11 @@ A CLI built on the library-first pattern can go one step further: make the comma
 // internal/cmd/migrate.go -- MigrateCommand struct, exported Run method
 ```
 
-The payoff is that commands become testable as units: construct the struct, call `Run`, assert on the result -- no subprocess, no captured output, no temporary binaries.  It also makes it straightforward to embed your tool's functionality into a larger host binary (e.g. a debug or admin server that bundles several sub-tools).
+The payoff is that commands become testable as units: construct the struct, call `Run`, assert on the result -- no subprocess, no captured output, no temporary binaries.  It also makes it straightforward to embed your tool's functionality into a larger host binary (eg, a debug or admin server that bundles several sub-tools).
 
 Output should flow through an `io.Writer` field on the command struct, not directly to `os.Stdout`.  This is the seam that makes testing and embedding work: in production, pass `os.Stdout`; in tests, pass a `bytes.Buffer`.
 
-**CLI framework conventions must not leak.** Design every CLI decision -- subcommand organization, naming, flag placement, error messages -- from the user's perspective, not the framework's.  If a user or operator can tell which CLI library was used by looking at the command tree or help output, the UX has failed.  For example, users should never need to know or care which CLI framework (Cobra, etc) this project uses.
+**CLI framework conventions must not leak.**  Design every CLI decision -- subcommand organization, naming, flag placement, error messages -- from the user's perspective, not the framework's.  If a user or operator can tell which CLI library was used by looking at the command tree or help output, the UX has failed.  For example, users should never need to know or care which CLI framework (Cobra, etc) this project uses.
 
 ### Concurrency
 
@@ -373,7 +373,7 @@ go func() {
 result, err := client.Connect(clientConn)
 ```
 
-**Multiple connections:** when the client opens fresh connections per operation (e.g. a connection-per-request pattern), pre-allocate the server and create a new pipe pair for each connection:
+**Multiple connections:** when the client opens fresh connections per operation (eg, a connection-per-request pattern), pre-allocate the server and create a new pipe pair for each connection:
 
 ```go
 srv := NewServer(config)
@@ -392,7 +392,7 @@ client := &Client{
 
 Each call to `ConnectFunc` gets its own isolated pipe pair with its own server goroutine.  No TCP listener needed, and each connection is independent.
 
-**Synchronous behavior exposes protocol bugs.** `net.Pipe` is synchronous with no internal buffering -- a write blocks until the other end reads the data (or closes its end, which fails the write with `io.ErrClosedPipe`).  This is a benefit: it catches protocol-level synchronization bugs that TCP's socket buffer would silently hide.  If the server writes a response and the client never reads it, the test hangs instead of passing -- which means the protocol has a real bug.  Fix: always drain the connection on both sides, or close the unused end to unblock the writer.  In tests that expect a server error response, read the error on the client side before asserting:
+**Synchronous behavior exposes protocol bugs.**  `net.Pipe` is synchronous with no internal buffering -- a write blocks until the other end reads the data (or closes its end, which fails the write with `io.ErrClosedPipe`).  This is a benefit: it catches protocol-level synchronization bugs that TCP's socket buffer would silently hide.  If the server writes a response and the client never reads it, the test hangs instead of passing -- which means the protocol has a real bug.  Fix: always drain the connection on both sides, or close the unused end to unblock the writer.  In tests that expect a server error response, read the error on the client side before asserting:
 
 ```go
 // send bad auth
@@ -452,7 +452,7 @@ Note: `defer` in a hot loop (millions of calls) adds overhead.  In those cases, 
 
 ### init() is almost always wrong
 
-`init()` runs at program start, in dependency order, before `main()`.  It is hard to test, impossible to mock, and invisible to callers.  The only legitimate uses are registering codecs with a known registry (e.g. SQL drivers, image formats) and initializing unexported package-level variables that truly cannot fail.
+`init()` runs at program start, in dependency order, before `main()`.  It is hard to test, impossible to mock, and invisible to callers.  The only legitimate uses are registering codecs with a known registry (eg, SQL drivers, image formats) and initializing unexported package-level variables that truly cannot fail.
 
 For anything else, use an explicit constructor (`New...`) or a `sync.Once`.
 
@@ -568,7 +568,7 @@ A Makefile that wraps these commands one-for-one provides no value -- it is just
 
 ### Do not use Makefiles
 
-Make is a build system for C. It understands file timestamps and C compilation units.  It does not understand Go modules, import graphs, or the Go toolchain's built-in dependency tracking.  Using Make for a Go project means maintaining a parallel, inferior build system on top of one that already works.
+Make is a build system for C.  It understands file timestamps and C compilation units.  It does not understand Go modules, import graphs, or the Go toolchain's built-in dependency tracking.  Using Make for a Go project means maintaining a parallel, inferior build system on top of one that already works.
 
 When the need is "run a sequence of commands", the right tools are a shell script or a small Go program under `cmd/`.  Both are readable by anyone on the project without knowledge of Make's syntax, tab-sensitivity rules, or implicit variable semantics.  A `cmd/release/main.go` that builds, signs, and uploads is explicit Go code -- it can be tested, it has proper error handling, and it does not require Make to be installed.
 
@@ -612,12 +612,12 @@ Package-level doc comments go in a file named `doc.go` (if the package is large)
 
 When generating or editing Go code in this project:
 
-- **Do not add interfaces speculatively.** If there is one concrete type, define a concrete type.  Extract an interface only when a second implementation exists or a test double is needed.
+- **Do not add interfaces speculatively.**  If there is one concrete type, define a concrete type.  Extract an interface only when a second implementation exists or a test double is needed.
 - **Do not add `// TODO` comments** for things the current task does not require.  Leave the code clean.
-- **Do not add logging to library code.** Libraries accept a `logger` if they must, or they return errors.  Printing to stderr from a library is almost always wrong.
-- **Do not add `context.Background()` as a default.** If a function takes a context, require it from the caller.  Do not paper over the gap with `context.Background()` or `context.TODO()` inside library code.
+- **Do not add logging to library code.**  Libraries accept a `logger` if they must, or they return errors.  Printing to stderr from a library is almost always wrong.
+- **Do not add `context.Background()` as a default.**  If a function takes a context, require it from the caller.  Do not paper over the gap with `context.Background()` or `context.TODO()` inside library code.
 - **Match the existing style** in the file you are editing.  If the file uses `errors.New`, do not introduce `fmt.Errorf`.
 - **Return the real type, not an interface**, unless the function is part of an existing API that already returns an interface.
-- **Do not add error wrapping that strips information.** `fmt.Errorf("error: %v", err)` without `%w` loses the original error type.  Use `%w` unless you intentionally want to hide the underlying error.
+- **Do not add error wrapping that strips information.**  `fmt.Errorf("error: %v", err)` without `%w` loses the original error type.  Use `%w` unless you intentionally want to hide the underlying error.
 - **Prefer `t.Fatal` over `t.Error` + `return`** in tests when continuing after a failure would cause a nil dereference or meaningless subsequent failures.
 - **Do not change `go.mod` or `go.sum`** unless the task explicitly requires a new dependency.  If a standard library alternative exists, use it.
