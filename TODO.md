@@ -2,10 +2,6 @@
 
 - verify implementation of Task 9 is completely correct
 
-- verify that all code / tasks have appropriate tests
-  - for example, `PasswordAuth` does not
-  - a task is not complete until all the code has meaningful tests
-
 - verify all comments match the appropriate/correct format
 
 - should we summarize the relevant tianonfmt rules here somewhere so they're easier/quicker to reference?  maybe make the upstream tianonfmt docs themselves tighter somehow?

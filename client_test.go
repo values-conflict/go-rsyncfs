@@ -1,6 +1,7 @@
 package rsyncfs
 
 import (
+	"bytes"
 	"io"
 	"io/fs"
 	"net"
@@ -487,6 +488,71 @@ func TestClientSession_OpenRootMode_NotImplemented(t *testing.T) {
 	if err == nil {
 		t.Error("expected error from unimplemented module open in root mode")
 	}
+}
+
+func TestPasswordAuth(t *testing.T) {
+	tests := []struct {
+		name      string
+		digest    string
+		password  string
+		challenge []byte
+	}{
+		{"md5", "md5", "secret", []byte("challenge")},
+		{"md4", "md4", "secret", []byte("challenge")},
+		{"md5 empty password", "md5", "", []byte("challenge")},
+		{"md4 empty challenge", "md4", "secret", []byte{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			authFn := PasswordAuth(tt.password)
+			if authFn == nil {
+				t.Fatal("PasswordAuth returned nil")
+			}
+
+			hash, err := authFn(tt.digest, tt.challenge)
+			if err != nil {
+				t.Fatalf("PasswordAuth(%q)(%q, %q) error: %v", tt.password, tt.digest, tt.challenge, err)
+			}
+
+			// verify against independently computed hash
+			want, err := computeAuthHash(tt.digest, tt.password, tt.challenge)
+			if err != nil {
+				t.Fatalf("computeAuthHash (expected): %v", err)
+			}
+			if !bytes.Equal(hash, want) {
+				t.Errorf("PasswordAuth(%q)(%q, %q) = %v, want %v", tt.password, tt.digest, tt.challenge, hash, want)
+			}
+		})
+	}
+
+	t.Run("unsupported digest", func(t *testing.T) {
+		authFn := PasswordAuth("secret")
+		_, err := authFn("blake3", []byte("challenge"))
+		if err == nil {
+			t.Fatal("expected error for unsupported digest, got nil")
+		}
+	})
+
+	t.Run("closure captures password", func(t *testing.T) {
+		// verify the closure correctly captures the password (not a reference to a mutable variable)
+		authFn := PasswordAuth("original")
+		hash1, err := authFn("md5", []byte("challenge"))
+		if err != nil {
+			t.Fatalf("first call: %v", err)
+		}
+
+		// calling PasswordAuth again with different password should not affect the first closure
+		_ = PasswordAuth("different")
+
+		hash2, err := authFn("md5", []byte("challenge"))
+		if err != nil {
+			t.Fatalf("second call: %v", err)
+		}
+		if !bytes.Equal(hash1, hash2) {
+			t.Error("PasswordAuth closure should produce consistent results")
+		}
+	})
 }
 
 func TestComputeAuthHash(t *testing.T) {
