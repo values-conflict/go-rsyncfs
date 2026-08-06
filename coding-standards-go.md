@@ -90,6 +90,8 @@ func Process(r io.Reader) (*Result, error)
 func NewClient(cfg Config) *Client
 ```
 
+**Connection-oriented code should accept `io.ReadWriter` or `net.Conn`.** When a library manages a protocol over a connection, the library should accept the connection as a parameter rather than creating it internally.  This lets callers control transport details (TCP, TLS, Unix sockets, etc.) and makes testing straightforward -- tests can pass a `net.Pipe` instead of spinning up real network listeners.  See the [`net.Pipe` testing pattern](#netpipe-for-testing-connection-oriented-code) below.
+
 ### Compiler enforcement of interface satisfaction
 
 Every type that claims to implement an interface gets a compile-time assertion adjacent to the type definition:
@@ -350,6 +352,59 @@ Mocks are often overused.  Before writing a mock, ask:
 - Is the behavior I am testing actually about this dependency, or about my code?
 
 When you do write a fake, write it by hand as a struct implementing an interface.  Auto-generated mocks (mockery, gomock) are heavier than they look: they encode call sequences and argument matchers, which makes tests brittle when refactoring.
+
+### `net.Pipe` for testing connection-oriented code
+
+When library code accepts `io.ReadWriter` or `net.Conn` for connections -- [which it should](#accept-interfaces-return-concrete-types) -- use `net.Pipe()` in tests instead of `net.Listen`/`net.Dial` with TCP.  `net.Pipe()` returns two connected `net.Conn` values -- one for each side -- with no network stack, no port allocation, no timing races, and no risk of port conflicts.
+
+**Single connection:** create one pipe, run the server on one end, the client on the other:
+
+```go
+serverConn, clientConn := net.Pipe()
+
+errCh := make(chan error, 1)
+go func() {
+    defer serverConn.Close()
+    _, err := srv.HandleConnection(serverConn, opts)
+    errCh <- err
+}()
+
+// use clientConn for the client side
+result, err := client.Connect(clientConn)
+```
+
+**Multiple connections:** when the client opens fresh connections per operation (e.g. a connection-per-request pattern), pre-allocate the server and create a new pipe pair for each connection:
+
+```go
+srv := NewServer(config)
+
+client := &Client{
+    ConnectFunc: func() (io.ReadWriter, error) {
+        serverConn, clientConn := net.Pipe()
+        go func() {
+            defer serverConn.Close()
+            _, _ = srv.HandleConnection(serverConn, opts)
+        }()
+        return clientConn, nil
+    },
+}
+```
+
+Each call to `ConnectFunc` gets its own isolated pipe pair with its own server goroutine.  No TCP listener needed, and each connection is independent.
+
+**Synchronous behavior exposes protocol bugs.** `net.Pipe` is synchronous with no internal buffering -- a write blocks until the other end reads the data (or closes its end, which fails the write with `io.ErrClosedPipe`).  This is a benefit: it catches protocol-level synchronization bugs that TCP's socket buffer would silently hide.  If the server writes a response and the client never reads it, the test hangs instead of passing -- which means the protocol has a real bug.  Fix: always drain the connection on both sides, or close the unused end to unblock the writer.  In tests that expect a server error response, read the error on the client side before asserting:
+
+```go
+// send bad auth
+clientConn.Write(wrongAuth)
+
+// drain the error response so the server goroutine can unblock
+var buf [1024]byte
+_, _ = clientConn.Read(buf[:])
+
+// now the server can finish and send its error
+err := <-errCh
+```
 
 ### Subtests and t.Helper
 
