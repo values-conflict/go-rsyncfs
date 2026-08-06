@@ -330,30 +330,16 @@ func TestClientOpen_RootModuleAccess(t *testing.T) {
 		t.Fatalf("NewServer failed: %v", err)
 	}
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				_, _ = srv.HandleConnection(c, HandleOptions{
-					LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5", "md4"}},
-				})
-				c.Close()
-			}(conn)
-		}
-	}()
-
 	client := &Client{
 		ConnectFunc: func(moduleName string) (io.ReadWriter, error) {
-			return net.Dial("tcp", ln.Addr().String())
+			serverConn, clientConn := net.Pipe()
+			go func() {
+				defer serverConn.Close()
+				_, _ = srv.HandleConnection(serverConn, HandleOptions{
+					LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5", "md4"}},
+				})
+			}()
+			return clientConn, nil
 		},
 	}
 
@@ -405,68 +391,48 @@ func TestClientOpen_RootModuleFileAccess(t *testing.T) {
 		t.Fatalf("NewServer failed: %v", err)
 	}
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				result, err := srv.HandleConnection(c, HandleOptions{
+	client := &Client{
+		ConnectFunc: func(moduleName string) (io.ReadWriter, error) {
+			serverConn, clientConn := net.Pipe()
+			go func() {
+				defer serverConn.Close()
+				result, err := srv.HandleConnection(serverConn, HandleOptions{
 					LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5", "md4"}},
 				})
 				if err != nil {
-					c.Close()
 					return
 				}
 
-				mw := mux.NewWriter(c)
-				mr := mux.NewReader(c)
+				mw := mux.NewWriter(serverConn)
+				mr := mux.NewReader(serverConn)
 				if err := sendFileList(mw, result.Module.FS, ".", result.Version, false); err != nil {
-					c.Close()
 					return
 				}
 
 				// read selector
 				var ndxBuf [1]byte
-				if _, err := c.Read(ndxBuf[:]); err != nil {
-					c.Close()
+				if _, err := serverConn.Read(ndxBuf[:]); err != nil {
 					return
 				}
 				var iflagsBuf [2]byte
 				if result.Version >= 29 {
-					if _, err := io.ReadFull(c, iflagsBuf[:]); err != nil {
-						c.Close()
+					if _, err := io.ReadFull(serverConn, iflagsBuf[:]); err != nil {
 						return
 					}
 				}
 
 				f, err := result.Module.FS.Open("file.txt")
 				if err != nil {
-					c.Close()
 					return
 				}
 
 				if err := sendFile(mr, mw, f, result.Version); err != nil {
 					f.Close()
-					c.Close()
 					return
 				}
 				f.Close()
-				c.Close()
-			}(conn)
-		}
-	}()
-
-	client := &Client{
-		ConnectFunc: func(moduleName string) (io.ReadWriter, error) {
-			return net.Dial("tcp", ln.Addr().String())
+			}()
+			return clientConn, nil
 		},
 	}
 

@@ -128,12 +128,6 @@ func TestHandleConnection_AuthSuccess(t *testing.T) {
 	mod := &ServerModule{Name: "testmod", Comment: "Test Module"}
 	s, _ := NewServer(mod)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-
 	opts := HandleOptions{
 		LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
 		AuthCallback: func(username string, challenge []byte) ([]byte, error) {
@@ -144,36 +138,26 @@ func TestHandleConnection_AuthSuccess(t *testing.T) {
 		},
 	}
 
+	serverConn, clientConn := net.Pipe()
 	errChan := make(chan error, 1)
 	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			errChan <- err
-			return
-		}
-		defer conn.Close()
-		_, err = s.HandleConnection(conn, opts)
+		defer serverConn.Close()
+		_, err := s.HandleConnection(serverConn, opts)
 		errChan <- err
 	}()
 
-	conn, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-
 	buf := make([]byte, 1024)
-	n, err := conn.Read(buf)
+	n, err := clientConn.Read(buf)
 	if err != nil {
 		t.Fatalf("failed to read server greeting: %v", err)
 	}
 	_ = string(buf[:n])
 
-	conn.Write([]byte("@RSYNCD: 32.0 md5\n"))
-	conn.Write([]byte("testmod\n"))
+	clientConn.Write([]byte("@RSYNCD: 32.0 md5\n"))
+	clientConn.Write([]byte("testmod\n"))
 
 	buf = make([]byte, 1024)
-	n, err = conn.Read(buf)
+	n, err = clientConn.Read(buf)
 	if err != nil {
 		t.Fatalf("failed to read auth request: %v", err)
 	}
@@ -183,11 +167,11 @@ func TestHandleConnection_AuthSuccess(t *testing.T) {
 	}
 
 	authResponse := fmt.Sprintf("alice %s\n", base64.StdEncoding.EncodeToString([]byte("valid-hash")))
-	conn.Write([]byte(authResponse))
+	clientConn.Write([]byte(authResponse))
 
 	// read @RSYNCD: OK
 	buf = make([]byte, 1024)
-	n, err = conn.Read(buf)
+	n, err = clientConn.Read(buf)
 	if err != nil {
 		t.Fatalf("failed to read auth OK: %v", err)
 	}
@@ -197,11 +181,11 @@ func TestHandleConnection_AuthSuccess(t *testing.T) {
 	}
 
 	// send arguments
-	conn.Write([]byte(".\x00\x00"))
+	clientConn.Write([]byte(".\x00\x00"))
 
 	// read server protocol version
 	buf = make([]byte, 4)
-	n, err = conn.Read(buf)
+	n, err = clientConn.Read(buf)
 	if err != nil {
 		t.Fatalf("failed to read server protocol version: %v", err)
 	}
@@ -209,7 +193,7 @@ func TestHandleConnection_AuthSuccess(t *testing.T) {
 	_ = binary.LittleEndian.Uint32(buf[:n]) // server protocol version
 
 	// send client protocol version response
-	conn.Write(protoVersionBytes(32))
+	clientConn.Write(protoVersionBytes(32))
 
 	if err := <-errChan; err != nil {
 		t.Fatalf("Handshake failed: %v", err)
@@ -220,12 +204,6 @@ func TestHandleConnection_AuthFailure(t *testing.T) {
 	mod := &ServerModule{Name: "testmod", Comment: "Test Module"}
 	s, _ := NewServer(mod)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-
 	opts := HandleOptions{
 		LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
 		AuthCallback: func(username string, challenge []byte) ([]byte, error) {
@@ -233,37 +211,30 @@ func TestHandleConnection_AuthFailure(t *testing.T) {
 		},
 	}
 
+	serverConn, clientConn := net.Pipe()
 	errChan := make(chan error, 1)
 	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			errChan <- err
-			return
-		}
-		defer conn.Close()
-		_, err = s.HandleConnection(conn, opts)
+		defer serverConn.Close()
+		_, err := s.HandleConnection(serverConn, opts)
 		errChan <- err
 	}()
 
-	conn, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-
 	buf := make([]byte, 1024)
-	_, _ = conn.Read(buf)
+	_, _ = clientConn.Read(buf)
 
-	conn.Write([]byte("@RSYNCD: 32.0 md5\n"))
-	conn.Write([]byte("testmod\n"))
+	clientConn.Write([]byte("@RSYNCD: 32.0 md5\n"))
+	clientConn.Write([]byte("testmod\n"))
 
 	buf = make([]byte, 1024)
-	_, _ = conn.Read(buf)
+	_, _ = clientConn.Read(buf)
 
 	authResponse := fmt.Sprintf("alice %s\n", base64.StdEncoding.EncodeToString([]byte("wrong-hash")))
-	conn.Write([]byte(authResponse))
+	clientConn.Write([]byte(authResponse))
 
-	err = <-errChan
+	// read the error response so the server goroutine can unblock
+	_, _ = clientConn.Read(buf)
+
+	err := <-errChan
 	if err == nil {
 		t.Fatal("Expected error for auth failure, got nil")
 	}

@@ -12,45 +12,24 @@ import (
 	"github.com/values-conflict/go-rsyncfs/protocol"
 )
 
-// startServer starts a TCP server accepting one connection and returns the client connection and server error channel.
+// startServer starts a server connected via net.Pipe and returns the client connection and server error channel
 func startServer(t *testing.T, mods []*ServerModule, opts HandleOptions) (net.Conn, <-chan error) {
-	t.Helper()
-	addr, srvErr := startServerNoConnect(t, mods, opts)
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { conn.Close() })
-	return conn, srvErr
-}
-
-// startServerNoConnect starts a TCP server but does not dial the connection. Returns the listener address and server error channel.
-func startServerNoConnect(t *testing.T, mods []*ServerModule, opts HandleOptions) (string, <-chan error) {
 	t.Helper()
 	srv, err := NewServer(mods...)
 	if err != nil {
 		t.Fatalf("NewServer failed: %v", err)
 	}
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { ln.Close() })
-
+	serverConn, clientConn := net.Pipe()
 	srvErr := make(chan error, 1)
 	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			srvErr <- err
-			return
-		}
-		defer conn.Close()
-		_, err = srv.HandleConnection(conn, opts)
+		defer serverConn.Close()
+		_, err := srv.HandleConnection(serverConn, opts)
 		srvErr <- err
 	}()
 
-	return ln.Addr().String(), srvErr
+	t.Cleanup(func() { clientConn.Close() })
+	return clientConn, srvErr
 }
 
 func TestClientConnect_BasicSuccess(t *testing.T) {
@@ -126,30 +105,20 @@ func TestClientConnect_ModuleList(t *testing.T) {
 		t.Fatalf("NewServer failed: %v", err)
 	}
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-
 	srvErr := make(chan error, 1)
-	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			srvErr <- err
-			return
-		}
-		defer conn.Close()
-		_, err = srv.HandleConnection(conn, HandleOptions{
-			LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
-		})
-		srvErr <- err
-	}()
 
 	// root mode client -- uses OpenRoot with ConnectFunc
 	client := &Client{
 		ConnectFunc: func(moduleName string) (io.ReadWriter, error) {
-			return net.Dial("tcp", ln.Addr().String())
+			serverConn, clientConn := net.Pipe()
+			go func() {
+				defer serverConn.Close()
+				_, err := srv.HandleConnection(serverConn, HandleOptions{
+					LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
+				})
+				srvErr <- err
+			}()
+			return clientConn, nil
 		},
 	}
 
@@ -222,21 +191,11 @@ func TestClientConnect_AuthRequired(t *testing.T) {
 	mod := &ServerModule{Name: "testmod", Comment: "Test", FS: fstest.MapFS{}}
 	srv, _ := NewServer(mod)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-
+	serverConn, clientConn := net.Pipe()
 	srvErr := make(chan error, 1)
 	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			srvErr <- err
-			return
-		}
-		defer conn.Close()
-		_, err = srv.HandleConnection(conn, HandleOptions{
+		defer serverConn.Close()
+		_, err := srv.HandleConnection(serverConn, HandleOptions{
 			LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
 			AuthCallback: func(username string, challenge []byte) ([]byte, error) {
 				if username == "alice" {
@@ -248,22 +207,16 @@ func TestClientConnect_AuthRequired(t *testing.T) {
 		srvErr <- err
 	}()
 
-	conn, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-
 	// client without auth should fail
 	client := &Client{Module: "testmod"}
-	_, err = client.Connect(conn)
+	_, err := client.Connect(clientConn)
 	if err == nil {
 		t.Fatal("expected error when server requires auth but client has no credentials")
 	}
+	clientConn.Close()
 
 	// server goroutine is blocked waiting for auth response that never comes
-	// close the listener to unblock it
-	ln.Close()
+	// close serverConn to unblock it (already deferred, but let's wait)
 	select {
 	case <-srvErr:
 	case <-time.After(2 * time.Second):
@@ -298,16 +251,24 @@ func TestClientConnect_ProtocolVersionExchange(t *testing.T) {
 }
 
 func TestClientConnect_NilRWWithConnectFunc(t *testing.T) {
-	addr, srvErr := startServerNoConnect(t, []*ServerModule{
-		{Name: "testmod", FS: fstest.MapFS{}},
-	}, HandleOptions{
-		LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
-	})
+	srv, err := NewServer(&ServerModule{Name: "testmod", FS: fstest.MapFS{}})
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
 
+	srvErr := make(chan error, 1)
 	session, err := (&Client{
 		Module: "testmod",
 		ConnectFunc: func(moduleName string) (io.ReadWriter, error) {
-			return net.Dial("tcp", addr)
+			serverConn, clientConn := net.Pipe()
+			go func() {
+				defer serverConn.Close()
+				_, err := srv.HandleConnection(serverConn, HandleOptions{
+					LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
+				})
+				srvErr <- err
+			}()
+			return clientConn, nil
 		},
 	}).Connect(nil)
 	if err != nil {
@@ -457,34 +418,18 @@ func TestClientSession_OpenModule_NotImplemented(t *testing.T) {
 	}
 	srv, _ := NewServer(mod)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-
+	serverConn, clientConn := net.Pipe()
 	srvErr := make(chan error, 1)
 	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			srvErr <- err
-			return
-		}
-		defer conn.Close()
-		_, err = srv.HandleConnection(conn, HandleOptions{
+		defer serverConn.Close()
+		_, err := srv.HandleConnection(serverConn, HandleOptions{
 			LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
 		})
 		srvErr <- err
 	}()
 
-	conn, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-
 	client := &Client{Module: "testmod"}
-	session, err := client.Connect(conn)
+	session, err := client.Connect(clientConn)
 	if err != nil {
 		t.Fatalf("Connect failed: %v", err)
 	}
@@ -503,32 +448,16 @@ func TestClientSession_OpenRootMode_NotImplemented(t *testing.T) {
 	mod2 := &ServerModule{Name: "mod2", Comment: "Second", FS: fstest.MapFS{}}
 	srv, _ := NewServer(mod1, mod2)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-
-	// accept connections but don't do anything with them
-	// (root mode opens fresh connections for each operation)
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func() {
-				_, _ = srv.HandleConnection(conn, HandleOptions{
-					LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
-				})
-				conn.Close()
-			}()
-		}
-	}()
-
 	client := &Client{
 		ConnectFunc: func(moduleName string) (io.ReadWriter, error) {
-			return net.Dial("tcp", ln.Addr().String())
+			serverConn, clientConn := net.Pipe()
+			go func() {
+				defer serverConn.Close()
+				_, _ = srv.HandleConnection(serverConn, HandleOptions{
+					LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
+				})
+			}()
+			return clientConn, nil
 		},
 	}
 	session, err := client.OpenRoot()

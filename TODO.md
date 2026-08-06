@@ -9,5 +9,3 @@
 - verify all comments match the appropriate/correct format
 
 - should we summarize the relevant tianonfmt rules here somewhere so they're easier/quicker to reference?  maybe make the upstream tianonfmt docs themselves tighter somehow?
-
-- check whether any tests ended up using actual TCP when they could be using `net.Pipe`
