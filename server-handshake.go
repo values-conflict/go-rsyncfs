@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/values-conflict/go-rsyncfs/protocol"
+	"github.com/values-conflict/go-rsyncfs/protocol/mux"
 )
 
 // compat flag bits matching upstream rsync compat_flags
@@ -24,50 +25,104 @@ const (
 	cfId0Names          = 1 << 8 // 'u'
 )
 
-// HandshakeResult contains the outcome of a successful server handshake.
-type HandshakeResult struct {
-	Module           *ServerModule
-	Version          int
-	Digest           string
-	VarintFlistFlags bool // true when CF_VARINT_FLIST_FLAGS is negotiated
-}
-
-// HandleOptions provides configuration for handling a connection's handshake.
+// HandleOptions provides configuration for handling a connection.
 type HandleOptions struct {
 	LocalGreeting protocol.Greeting                                       // what version/digests we advertise
 	AuthCallback  func(username string, challenge []byte) ([]byte, error) // nil = no auth required
 }
 
-// HandleConnection runs the full text-phase handshake on a single connection.
-// It returns control to the caller when ready for data transfer (Phase 4), or an error at any point.
-func (s *Server) HandleConnection(rw io.ReadWriter, opts HandleOptions) (*HandshakeResult, error) {
-	// use a simple byte-by-byte reading approach to avoid over-reading into Phase 4
+// HandleConnection runs the full rsync protocol on a single connection:
+//
+// - handshake (Phases 1-4)
+// - file list transfer
+// - file data transfers
+//
+// It returns when the connection is closed or an error occurs.
+//
+// If opts.LocalGreeting is the zero value, defaults are applied via [protocol.Greeting.ApplyDefaults].
+func (s *Server) HandleConnection(rw io.ReadWriter, opts HandleOptions) error {
+	opts.LocalGreeting.ApplyDefaults()
 
-	// --- Phase 1: Greeting Exchange ---
+	// --- Phases 1-4: Handshake ---
 
-	// send server greeting
-	if _, err := rw.Write([]byte(opts.LocalGreeting.String())); err != nil {
-		return nil, fmt.Errorf("failed to send greeting: %w", err)
+	result, err := s.doHandshake(rw, opts)
+	if err != nil {
+		return err
+	}
+	if result == nil {
+		return nil // clean disconnect or #list
 	}
 
-	// read client greeting
+	// --- Phase 5: Data Transfer ---
+
+	mw := mux.NewWriter(rw)
+	mr := mux.NewReader(rw)
+
+	if err := sendFileList(mw, result.Module.FS, ".", result.Version, result.VarintFlistFlags); err != nil {
+		return fmt.Errorf("send file list: %w", err)
+	}
+
+	entries, err := walkFS(result.Module.FS, ".")
+	if err != nil {
+		return fmt.Errorf("walk fs: %w", err)
+	}
+
+	// handle file transfer requests (selectors are MSG_DATA mux frames)
+	ndx := newNdxState()
+	for {
+		sel, err := ndx.readSelector(mr, result.Version)
+		if err != nil {
+			return nil // connection closed or read error
+		}
+		if sel.ndx < 0 || int(sel.ndx) >= len(entries) {
+			return nil // invalid selector, exit cleanly
+		}
+
+		f, err := result.Module.FS.Open(entries[sel.ndx].name)
+		if err != nil {
+			return fmt.Errorf("open %q: %w", entries[sel.ndx].name, err)
+		}
+
+		if err := sendFile(mr, mw, f, result.Version); err != nil {
+			f.Close()
+			return fmt.Errorf("send file %q: %w", entries[sel.ndx].name, err)
+		}
+		f.Close()
+	}
+}
+
+// handshakeResult contains the outcome of a successful server handshake.
+type handshakeResult struct {
+	Module           *ServerModule
+	Version          int
+	Digest           string
+	VarintFlistFlags bool
+}
+
+// doHandshake runs Phases 1-4 of the rsync protocol and returns the result.
+// Returns nil result for clean disconnects or #list requests.
+func (s *Server) doHandshake(rw io.ReadWriter, opts HandleOptions) (*handshakeResult, error) {
+	// --- Phase 1: Greeting Exchange ---
+
+	if _, err := rw.Write([]byte(opts.LocalGreeting.String())); err != nil {
+		return nil, fmt.Errorf("send greeting: %w", err)
+	}
+
 	clientGreetLine, err := readLine(rw)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read client greeting: %w", err)
+		return nil, fmt.Errorf("read client greeting: %w", err)
 	}
 
 	clientGreeting, err := protocol.ParseGreeting(string(clientGreetLine))
 	if err != nil {
-		// send error and return
 		_ = s.SendError(rw, "invalid greeting")
-		return nil, fmt.Errorf("failed to parse client greeting: %w", err)
+		return nil, fmt.Errorf("parse client greeting: %w", err)
 	}
 
-	// Negotiate always takes (client, server) -- client preference wins digest selection
 	version, _, digest, err := protocol.Negotiate(*clientGreeting, opts.LocalGreeting)
 	if err != nil {
 		_ = s.SendError(rw, "protocol version negotiation failed")
-		return nil, fmt.Errorf("negotiation error: %w", err)
+		return nil, fmt.Errorf("negotiation: %w", err)
 	}
 
 	// --- Phase 2: Module Selection & Authentication ---
@@ -79,11 +134,9 @@ Loop:
 		line, err := readLine(rw)
 		if err != nil {
 			if err == io.EOF {
-				// client disconnected after greeting exchange
-				// treat as clean disconnect rather than an error
-				return nil, nil
+				return nil, nil // clean disconnect
 			}
-			return nil, fmt.Errorf("failed to read module request: %w", err)
+			return nil, fmt.Errorf("read module request: %w", err)
 		}
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
@@ -91,36 +144,33 @@ Loop:
 		}
 
 		if string(line) == "#list" {
-			// handle #list request
-			// the server closes the connection after #list (upstream exits the child process)
 			if err := s.sendModuleList(rw); err != nil {
-				return nil, fmt.Errorf("failed to send module list: %w", err)
+				return nil, fmt.Errorf("send module list: %w", err)
 			}
-			return nil, fmt.Errorf("connection closed after #list")
+			return nil, nil // connection closes after #list
 		}
 
-		moduleName := string(line)
-		mod, ok := s.modules[moduleName]
+		mod, ok := s.modules[string(line)]
 		if !ok {
 			_ = s.SendError(rw, "Unknown module")
-			return nil, fmt.Errorf("unknown module: %s", moduleName)
+			return nil, fmt.Errorf("unknown module: %s", line)
 		}
 		selectedModule = mod
 		break Loop
 	}
 
-	// authentication (if configured)
+	// Authentication (if configured)
 	if opts.AuthCallback != nil {
-		challenge := make([]byte, 16) // in real rsync this is random data
+		challenge := make([]byte, 16)
 
 		challengeB64 := base64.StdEncoding.EncodeToString(challenge)
 		if _, err := rw.Write([]byte(fmt.Sprintf("@RSYNCD: AUTHREQD %s\n", challengeB64))); err != nil {
-			return nil, fmt.Errorf("failed to send auth request: %w", err)
+			return nil, fmt.Errorf("send auth request: %w", err)
 		}
 
 		authLine, err := readLine(rw)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read auth response: %w", err)
+			return nil, fmt.Errorf("read auth response: %w", err)
 		}
 
 		parts := strings.Fields(string(authLine))
@@ -130,11 +180,10 @@ Loop:
 		}
 
 		username := parts[0]
-		responseHashB64 := parts[1]
-		responseHash, err := base64.StdEncoding.DecodeString(responseHashB64)
+		responseHash, err := base64.StdEncoding.DecodeString(parts[1])
 		if err != nil {
 			_ = s.SendError(rw, "Authentication failed")
-			return nil, fmt.Errorf("invalid auth response hash: %w", err)
+			return nil, fmt.Errorf("decode auth hash: %w", err)
 		}
 
 		expectedResponse, err := opts.AuthCallback(username, challenge)
@@ -144,13 +193,11 @@ Loop:
 		}
 
 		if _, err := rw.Write([]byte("@RSYNCD: OK\n")); err != nil {
-			return nil, fmt.Errorf("failed to send auth success: %w", err)
+			return nil, fmt.Errorf("send auth success: %w", err)
 		}
 	} else {
-		// no auth required -- send OK to signal module selection succeeded
-		// this matches real rsync behavior: server always sends AUTHREQD or OK after module selection
 		if _, err := rw.Write([]byte("@RSYNCD: OK\n")); err != nil {
-			return nil, fmt.Errorf("failed to send OK: %w", err)
+			return nil, fmt.Errorf("send OK: %w", err)
 		}
 	}
 
@@ -162,52 +209,45 @@ Loop:
 	} else {
 		args, err = readDelimitedArgs(rw, '\n')
 	}
-
 	if err != nil {
-		return nil, fmt.Errorf("failed to read arguments: %w", err)
+		return nil, fmt.Errorf("read arguments: %w", err)
 	}
 
-	// extract client_info from -e argument (proto >= 30)
 	var clientInfo string
 	if version >= 30 {
 		clientInfo = extractClientInfo(args)
 	}
 
 	// --- Phase 4: Protocol Version Exchange (binary) ---
-	// server sends its protocol version as int32 LE
+
 	var protoBuf [4]byte
 	binary.LittleEndian.PutUint32(protoBuf[:], uint32(version))
 	if _, err := rw.Write(protoBuf[:]); err != nil {
-		return nil, fmt.Errorf("failed to send protocol version: %w", err)
+		return nil, fmt.Errorf("send protocol version: %w", err)
 	}
 
-	// read client's protocol version response
 	if _, err := io.ReadFull(rw, protoBuf[:]); err != nil {
-		return nil, fmt.Errorf("failed to read client protocol version: %w", err)
+		return nil, fmt.Errorf("read client protocol version: %w", err)
 	}
 	clientProto := int(binary.LittleEndian.Uint32(protoBuf[:]))
 	if clientProto < version {
 		version = clientProto
 	}
 
-	// --- Compat Flags Exchange (proto >= 30) ---
-	// resolve compat flags based on server capabilities and client's advertised features
+	// Compat Flags Exchange (proto >= 30)
 	var compatFlags int
 	if version >= 30 {
 		compatFlags = resolveCompatFlags(clientInfo)
-		// send compat flags as varint
 		if err := protocol.WriteVarint(rw, int32(compatFlags)); err != nil {
-			return nil, fmt.Errorf("failed to send compat flags: %w", err)
+			return nil, fmt.Errorf("send compat flags: %w", err)
 		}
 	}
 
-	varintFlistFlags := (compatFlags & cfVarintFlistFlags) != 0
-
-	return &HandshakeResult{
+	return &handshakeResult{
 		Module:           selectedModule,
 		Version:          version,
 		Digest:           digest,
-		VarintFlistFlags: varintFlistFlags,
+		VarintFlistFlags: (compatFlags & cfVarintFlistFlags) != 0,
 	}, nil
 }
 
@@ -284,8 +324,7 @@ func extractClientInfo(args []string) string {
 	return ""
 }
 
-// resolveCompatFlags builds the server's compat flags based on its capabilities
-// and the client's advertised feature flags in clientInfo.
+// resolveCompatFlags builds the server's compat flags based on its capabilities and the client's advertised feature flags in clientInfo.
 func resolveCompatFlags(clientInfo string) int {
 	flags := 0
 

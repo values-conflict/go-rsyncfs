@@ -5,6 +5,71 @@ import (
 	"testing"
 )
 
+func TestGreetingApplyDefaults(t *testing.T) {
+	tests := []struct {
+		name  string
+		in    Greeting
+		check func(t *testing.T, g Greeting)
+	}{
+		{
+			"zero value fills all defaults",
+			Greeting{},
+			func(t *testing.T, g Greeting) {
+				if g.Version == 0 {
+					t.Error("Version should be non-zero after ApplyDefaults")
+				}
+				if len(g.Digests) == 0 {
+					t.Error("Digests should be non-empty after ApplyDefaults")
+				}
+			},
+		},
+		{
+			"version set, digests filled",
+			Greeting{Version: 30, SubProtocol: 0},
+			func(t *testing.T, g Greeting) {
+				if g.Version != 30 {
+					t.Errorf("Version should be preserved, got %d", g.Version)
+				}
+				if len(g.Digests) == 0 {
+					t.Error("Digests should be non-empty after ApplyDefaults")
+				}
+			},
+		},
+		{
+			"digests set, version filled",
+			Greeting{Digests: []string{"sha256"}},
+			func(t *testing.T, g Greeting) {
+				if g.Version == 0 {
+					t.Error("Version should be non-zero after ApplyDefaults")
+				}
+				if len(g.Digests) != 1 || g.Digests[0] != "sha256" {
+					t.Errorf("Digests should be preserved, got %v", g.Digests)
+				}
+			},
+		},
+		{
+			"already set, nothing changed",
+			Greeting{Version: 28, SubProtocol: 0, Digests: []string{"md4"}},
+			func(t *testing.T, g Greeting) {
+				if g.Version != 28 {
+					t.Errorf("Version should be preserved, got %d", g.Version)
+				}
+				if len(g.Digests) != 1 || g.Digests[0] != "md4" {
+					t.Errorf("Digests should be preserved, got %v", g.Digests)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.in
+			got.ApplyDefaults()
+			tt.check(t, got)
+		})
+	}
+}
+
 func TestParseGreeting(t *testing.T) {
 	tests := []struct {
 		name    string

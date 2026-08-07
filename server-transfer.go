@@ -282,3 +282,148 @@ func sendFileChecksum(w *mux.Writer, data []byte, s2length int) error {
 	cksum := checksum2(data, s2length)
 	return w.WriteMsg(mux.MsgData, cksum)
 }
+
+// selector holds a parsed file selector from the client.
+type selector struct {
+	ndx     int32
+	iflags  int
+	version int
+}
+
+// readSelector reads a file selector from the mux stream.
+// Selectors are sent as MSG_DATA frames containing compressed NDX + item flags.
+// The NDX is delta-encoded, so the ndxState is maintained across calls.
+func (s *ndxState) readSelector(r *mux.Reader, version int) (*selector, error) {
+	code, payload, err := r.ReadMsg()
+	if err != nil {
+		return nil, fmt.Errorf("read selector msg: %w", err)
+	}
+	if code != mux.MsgData {
+		return nil, fmt.Errorf("expected MSG_DATA for selector, got code %d", code)
+	}
+
+	if len(payload) == 0 {
+		return nil, fmt.Errorf("empty selector")
+	}
+
+	var ndx int32
+	var off int
+
+	if version < 30 {
+		// proto < 30: int32 LE
+		if len(payload) < 4 {
+			return nil, fmt.Errorf("selector too short for proto < 30: %d bytes", len(payload))
+		}
+		ndx = int32(binary.LittleEndian.Uint32(payload))
+		off = 4
+	} else {
+		// proto >= 30: compressed NDX (delta-encoded)
+		var err error
+		ndx, off, err = s.readCompressedNdx(payload)
+		if err != nil {
+			return nil, fmt.Errorf("read compressed ndx: %w", err)
+		}
+	}
+
+	iflags := 0
+	if version >= 29 && off+2 <= len(payload) {
+		iflags = int(payload[off]) | int(payload[off+1])<<8
+	}
+
+	return &selector{ndx: ndx, iflags: iflags, version: version}, nil
+}
+
+// ndxState tracks delta-encoding state for compressed NDX.
+type ndxState struct {
+	prevPositive int32
+	prevNegative int32
+}
+
+// newNdxState creates initial NDX state matching upstream defaults.
+func newNdxState() *ndxState {
+	return &ndxState{prevPositive: -1, prevNegative: 1}
+}
+
+// readCompressedNdx reads a compressed NDX from the given bytes.
+// Returns the NDX value, bytes consumed, and any error.
+// Implements the upstream read_ndx() algorithm from io.c.
+func (s *ndxState) readCompressedNdx(data []byte) (int32, int, error) {
+	if len(data) == 0 {
+		return 0, 0, fmt.Errorf("no data for compressed ndx")
+	}
+
+	b := data[0]
+
+	// NDX_DONE: single byte 0x00, no side effects
+	if b == 0 {
+		return -1, 1, nil
+	}
+
+	var prevPtr *int32
+	negate := false
+
+	if b == 0xFF {
+		// negative index prefix
+		negate = true
+		prevPtr = &s.prevNegative
+		if len(data) < 2 {
+			return 0, 0, fmt.Errorf("truncated negative ndx prefix")
+		}
+		b = data[1]
+	} else {
+		prevPtr = &s.prevPositive
+	}
+
+	var num int32
+	var off int
+
+	if b == 0xFE {
+		// 2-byte or 4-byte form
+		if negate {
+			off = 2
+		} else {
+			off = 1
+		}
+		if len(data)-off < 2 {
+			return 0, 0, fmt.Errorf("truncated 2/4-byte ndx")
+		}
+		b1 := data[off]
+		b2 := data[off+1]
+		if b1&0x80 != 0 {
+			// 4-byte form: encodes the ABSOLUTE index (not a diff)
+			// wire: [0x80|hi, lo, mid1, mid2] → LE int32
+			if len(data)-off < 4 {
+				return 0, 0, fmt.Errorf("truncated 4-byte ndx")
+			}
+			b3 := data[off+2]
+			b4 := data[off+3]
+			off += 4
+			num = int32(b2) | int32(b3)<<8 | int32(b4)<<16 | int32(b1&0x7F)<<24
+			// 4-byte form is absolute, don't add diff
+		} else {
+			// 2-byte form: big-endian diff
+			off += 3
+			num = int32(b1)<<8 | int32(b2)
+			// 2-byte form is a diff, add to previous
+			num += *prevPtr
+		}
+	} else {
+		// 1-byte form: diff
+		if negate {
+			off = 2
+		} else {
+			off = 1
+		}
+		num = int32(b)
+		// 1-byte form is a diff, add to previous
+		num += *prevPtr
+	}
+
+	*prevPtr = num
+
+	if negate {
+		num = -num
+	}
+
+	return num, off, nil
+}

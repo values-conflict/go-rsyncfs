@@ -25,8 +25,8 @@ type Client struct {
 	// string enables root mode (all modules as top-level directories).
 	Module string
 
-	// Greeting is the greeting sent to the server. Zero value defaults to
-	// protocol version 32 with md5/md4 digests.
+	// Greeting is the greeting sent to the server. Zero value fields
+	// are filled by [protocol.Greeting.ApplyDefaults].
 	Greeting protocol.Greeting
 
 	// AuthUser is the username for module authentication. Empty
@@ -55,17 +55,6 @@ type Client struct {
 	// ConnectFunc is called with the configured Module name to create
 	// the connection.
 	ConnectFunc func(moduleName string) (io.ReadWriter, error)
-}
-
-// applyDefaults sets default greeting values if not already configured.
-func (c *Client) applyDefaults() {
-	if c.Greeting.Version == 0 {
-		c.Greeting.Version = 32
-		c.Greeting.SubProtocol = 0
-	}
-	if len(c.Greeting.Digests) == 0 {
-		c.Greeting.Digests = []string{"md5", "md4"}
-	}
 }
 
 // PasswordAuth returns an AuthResponse function that computes the standard rsync auth hash: digest(password + challenge) using the negotiated algorithm.
@@ -106,8 +95,10 @@ type Session struct {
 	digest           string
 	moduleName       string
 	connectFunc      func(string) (io.ReadWriter, error) // for root mode, creates connections on-demand
-	prevNdx          int32                               // tracks previous positive NDX for compressed delta encoding
+	prevPositive     int32                               // tracks previous positive NDX for compressed delta encoding
+	prevNegative     int32                               // tracks previous negative NDX for compressed delta encoding
 	varintFlistFlags bool                                // true when CF_VARINT_FLIST_FLAGS is negotiated
+	fileList         []fileListEntry                     // cached file list from server (populated on first Open)
 }
 
 var _ fs.FS = (*Session)(nil) // compile-time interface check
@@ -139,7 +130,7 @@ func (c Client) Connect(rw io.ReadWriter) (*Session, error) {
 		}
 	}
 
-	c.applyDefaults()
+	c.Greeting.ApplyDefaults()
 
 	// --- Phase 1: Greeting Exchange ---
 
@@ -165,12 +156,13 @@ func (c Client) Connect(rw io.ReadWriter) (*Session, error) {
 	}
 
 	s := &Session{
-		client:     &c,
-		rw:         rw,
-		version:    version,
-		digest:     digest,
-		moduleName: c.Module,
-		prevNdx:    -1,
+		client:       &c,
+		rw:           rw,
+		version:      version,
+		digest:       digest,
+		moduleName:   c.Module,
+		prevPositive: -1,
+		prevNegative: 1,
 	}
 
 	// --- Phase 2: Module Selection ---
@@ -289,7 +281,7 @@ func (c Client) OpenRoot() (*Session, error) {
 		return nil, fmt.Errorf("root mode requires ConnectFunc")
 	}
 
-	c.applyDefaults()
+	c.Greeting.ApplyDefaults()
 
 	// no greeting probe needed: every FS operation (#list, module Open) opens its own fresh connection and does a full greeting exchange + negotiation anyway. probing here would just add an extra round-trip to learn what we'll re-learn on the next connection
 

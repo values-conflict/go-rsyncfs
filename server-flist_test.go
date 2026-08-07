@@ -300,8 +300,8 @@ func TestWriteMode(t *testing.T) {
 	}
 }
 
-// TestWriteXflags_ProtocolLessThan28 verifies that proto < 28 xflags fallback
-// matches upstream: dirs get XMIT_LONG_NAME (0x40), non-dirs get XMIT_TOP_DIR (0x01).
+// TestWriteXflags_ProtocolLessThan28 verifies that proto < 28 xflags fallback matches upstream: dirs get XMIT_LONG_NAME (0x40), non-dirs get XMIT_TOP_DIR (0x01).
+//
 // Verified against upstream flist.c send_file_entry():
 //
 //	if (!(xflags & 0xFF))

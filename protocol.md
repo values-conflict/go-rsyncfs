@@ -130,6 +130,8 @@ When `v` (CF_VARINT_FLIST_FLAGS) is negotiated, xmit flags in the file list use 
 
 ## Multiplexed I/O Layer
 
+Once Phase 4 begins, **all data on the socket flows through the multiplexed I/O layer**.  This includes file lists, selectors, checksums, file data, and control messages.  The upstream iobuf system transparently wraps raw writes in `MSG_DATA` frames and unwraps them on reads, so code that calls `write_ndx()` or `read_ndx()` is actually sending/receiving `MSG_DATA` frames on the wire.
+
 Every frame: 4-byte header + payload.  Header is a **little-endian uint32**:
 ```
 header = ((MPLEX_BASE + msgCode) << 24) | length
@@ -270,23 +272,25 @@ Stateful delta encoding that tracks previous positive and negative indices indep
 For cases 2 and 3, encode the diff:
 - `1 <= diff <= 253`: single byte = diff
 - `diff == 0` or `254 <= diff <= 32767`: `0xFE` + 2-byte big-endian diff
-- `diff < 0` or `diff > 32767`: `0xFE` + 4 bytes: `(ndx >> 24) | 0x80`, `ndx & 0xFF`, `(ndx >> 8) & 0xFF`, `(ndx >> 16) & 0xFF`
+- `diff < 0` or `diff > 32767`: `0xFE` + 4 bytes encoding the **absolute index** (not the diff): `(absNdx >> 24) | 0x80`, `absNdx & 0xFF`, `(absNdx >> 8) & 0xFF`, `(absNdx >> 16) & 0xFF`
+
+**Important:** The 4-byte form encodes the absolute index value, NOT the diff. The reader must NOT add it to the previous tracker value. The 1-byte and 2-byte forms encode diffs and ARE added to the tracker.
 
 **Reading (`read_ndx`):**
 
 1. Read first byte:
    - `0x00` → return `NDX_DONE (-1)`, no state change
    - `0xFF` → read next byte into `b[0]`, use `prev_negative` as tracking variable, result will be negated
-   - `0x01-0xFD` → `result = byte_value + prev_positive`, update `prev_positive`
+   - `0x01-0xFD` → `result = byte_value + prev_positive`, update `prev_positive` (1-byte diff form)
    - `0xFE` → read next byte into `b[0]`:
-     - High bit set (`b[0] & 0x80`): read 2 more bytes into `b[1..2]`, reconstruct as `b[3]=(b[0]&0x7F), b[0]=b[1], b[1]=b[2]`, then `num = IVAL(b, 0)` (LE int32)
-     - High bit clear: read 1 more byte into `b[1]`, `num = (b[0]<<8 | b[1]) + *prev_ptr`
+     - High bit set (`b[0] & 0x80`): read 2 more bytes into `b[1..2]`, reconstruct as `b[3]=(b[0]&0x7F), b[0]=b[1], b[1]=b[2]`, then `num = IVAL(b, 0)` (LE int32). **This is the absolute index, NOT a diff.** Update tracker to this value.
+     - High bit clear: read 1 more byte into `b[1]`, `num = (b[0]<<8 | b[1]) + *prev_ptr` (2-byte diff form)
 
 For `0xFF` path, negate the final result before returning.
 
 ### File Selector Protocol (after file list transfer)
 
-After the file list is complete (NDX_DONE sent), the client sends **selectors** to request specific files for transfer.  Each selector consists of:
+After the file list is complete (NDX_DONE sent), the client sends **selectors** to request specific files for transfer.  Each selector is sent as a **`MSG_DATA` mux frame** containing:
 
 ```
 ndx       : compressed NDX (or int32 LE for proto < 30)
@@ -295,6 +299,8 @@ iflags    : shortint (2 bytes LE) -- item flags (proto ≥ 29)
 [type]    : uint8 -- fnamecmp_type (if ITEM_BASIS_TYPE_FOLLOWS is set)
 [xname]   : vstring -- alternate filename (if ITEM_XNAME_FOLLOWS is set)
 ```
+
+**Important:** Although the upstream code calls `write_ndx()` and `write_shortint()` (which appear to be raw writes), these are transparently wrapped in `MSG_DATA` frames by the iobuf system.  The selector is a `MSG_DATA` mux frame on the wire.  This allows selectors and file data to interleave correctly on the same socket.  The NDX is delta-encoded and stateful (tracking `prev_positive` and `prev_negative` independently), so selectors must be read in order.
 
 #### Item Flags (from rsync.h)
 

@@ -57,6 +57,18 @@ func ParseGreeting(line string) (*Greeting, error) {
 	}, nil
 }
 
+// ApplyDefaults fills in missing fields with sensible defaults:
+// version 32, subprotocol 0, digests ["md5", "md4"].
+func (g *Greeting) ApplyDefaults() {
+	if g.Version == 0 {
+		g.Version = 32
+		g.SubProtocol = 0
+	}
+	if len(g.Digests) == 0 {
+		g.Digests = []string{"md5", "md4"}
+	}
+}
+
 // String formats the greeting back to the wire format.
 func (g *Greeting) String() string {
 	var sb strings.Builder

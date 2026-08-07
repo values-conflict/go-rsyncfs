@@ -140,22 +140,17 @@ func NewServer(mods ...*ServerModule) (*Server, error)
 
 ### ~~Task 5 -- Server: full handshake (`server-handshake.go`)~~
 
-**Goal:** Implement the server-side connection handshake: greeting exchange → module selection → auth (if configured) → argument parsing.  Returns control to caller when ready for data transfer, or an error at any point.
+**Goal:** Implement the server-side connection handling: greeting exchange → module selection → auth (if configured) → argument parsing → file list → file data transfers.  `HandleConnection` runs the full protocol lifecycle on a single connection.
 
 **Files:** `server-handshake.go`, `server-handshake_test.go`
 
 **API sketch:**
 
 ```go
-type HandshakeResult struct {
-	Module           *ServerModule
-	Version          int
-	Digest           string
-	VarintFlistFlags bool // true when CF_VARINT_FLIST_FLAGS is negotiated
-}
-
-// HandleConnection runs the full text-phase handshake on a single connection.
-func (s *Server) HandleConnection(rw io.ReadWriter, opts HandleOptions) (*HandshakeResult, error)
+// HandleConnection runs the full rsync protocol on a single connection: handshake (Phases 1-4), file list transfer, and file data transfers.
+//
+// If opts.LocalGreeting is the zero value, defaults are applied (version 32, subprotocol 0, digests ["md5", "md4"]).
+func (s *Server) HandleConnection(rw io.ReadWriter, opts HandleOptions) error
 
 type HandleOptions struct {
 	LocalGreeting Greeting                                                // what version/digests we advertise
@@ -326,7 +321,7 @@ func (s *Session) Open(name string) (fs.File, error)
 - Root mode: entering a module directory opens a separate connection to that module
 - Flist reader: varint xflags decoded correctly when `CF_VARINT_FLIST_FLAGS` is negotiated
 
-### Task 10 -- Cross-implementation tests (`cross_test.go`)
+### ~~Task 10 -- Cross-implementation tests (`cross_test.go`)~~
 
 **Goal:** Integration tests connecting Client directly to Server through `io.Pipe()` with embedded test fixtures.  Run `testing/fstest.TestFS` as additional validation.
 

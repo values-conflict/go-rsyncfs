@@ -257,10 +257,13 @@ func (fr *flistReader) readID() (int32, error) {
 	return int32(binary.LittleEndian.Uint32(b)), nil
 }
 
-// readFileList reads the file list from the server.
-// It reads MSG_DATA frames containing file list entries and parses them into a slice of entries.
-// After the file list, it reads and discards the NDX_DONE marker.
+// readFileList reads the file list from the server and caches it.
+// The file list is sent once per connection by the server, so we read it on the first call and return the cached copy on subsequent calls.
 func (s *Session) readFileList() ([]fileListEntry, error) {
+	if s.fileList != nil {
+		return s.fileList, nil
+	}
+
 	code, payload, err := s.muxReader.ReadMsg()
 	if err != nil {
 		return nil, fmt.Errorf("read file list msg: %w", err)
@@ -288,46 +291,51 @@ func (s *Session) readFileList() ([]fileListEntry, error) {
 	// the NDX_DONE marker is included in the MSG_DATA payload (after the end-of-list marker)
 	// it's already consumed by the flistReader or left as trailing bytes -- either way, we're done
 
+	s.fileList = entries
 	return entries, nil
 }
 
 // writeNdx writes a compressed file index to the wire.
 // Implements the upstream write_ndx() algorithm from io.c.
-func writeNdx(w io.Writer, ndx int, version int, prevNdx *int32) error {
+// Uses separate prevPositive/prevNegative trackers to match upstream.
+func writeNdx(w io.Writer, ndx int, version int, prevPositive, prevNegative *int32) error {
 	if version < 30 {
 		return writeIntLE(w, uint32(int32(ndx)), 4)
 	}
 	if ndx == -1 {
+		// NDX_DONE: single byte 0x00, no side effects
 		_, err := w.Write([]byte{0})
 		return err
 	}
 
-	var prefix byte
-	absNdx := ndx
-	if ndx < 0 {
-		prefix = 0xFF
-		absNdx = -ndx
-	}
-	diff := int32(absNdx) - *prevNdx
-	*prevNdx = int32(absNdx)
-
+	var prevPtr *int32
+	var absNdx int32
 	var buf []byte
+
+	if ndx >= 0 {
+		absNdx = int32(ndx)
+		prevPtr = prevPositive
+	} else {
+		absNdx = -int32(ndx)
+		prevPtr = prevNegative
+		buf = append(buf, 0xFF) // negative prefix
+	}
+
+	diff := absNdx - *prevPtr
+	*prevPtr = absNdx
+
 	switch {
 	case diff >= 1 && diff <= 253:
-		buf = []byte{prefix, byte(diff)}
+		buf = append(buf, byte(diff))
 	case diff >= 0 && diff <= 0x7FFF:
-		buf = []byte{prefix, 0xFE, byte(diff >> 8), byte(diff)}
+		buf = append(buf, 0xFE, byte(diff>>8), byte(diff))
 	default:
-		buf = []byte{
-			prefix, 0xFE,
-			byte((absNdx >> 24) | 0x80),
+		// 4-byte form: encode absNdx as LE with high bit set
+		buf = append(buf, 0xFE,
+			byte((absNdx>>24)|0x80),
 			byte(absNdx),
-			byte(absNdx >> 8),
-			byte(absNdx >> 16),
-		}
-	}
-	if prefix == 0 {
-		buf = buf[1:] // strip prefix byte for positive indices
+			byte(absNdx>>8),
+			byte(absNdx>>16))
 	}
 
 	_, err := w.Write(buf)
@@ -336,19 +344,20 @@ func writeNdx(w io.Writer, ndx int, version int, prevNdx *int32) error {
 
 // writeSelector sends a file selector to the server, requesting a specific file for transfer.
 // The selector consists of a compressed NDX followed by item flags (shortint for proto >= 29).
+// Like all data in Phase 4, selectors are sent as MSG_DATA mux frames (not raw bytes).
 func (s *Session) writeSelector(ndx int, iflags int) error {
-	if err := writeNdx(s.rw, ndx, s.version, &s.prevNdx); err != nil {
+	buf := new(bytes.Buffer)
+	if err := writeNdx(buf, ndx, s.version, &s.prevPositive, &s.prevNegative); err != nil {
 		return fmt.Errorf("write selector ndx: %w", err)
 	}
 
 	if s.version >= 29 {
 		// item flags as shortint (2 bytes LE)
-		buf := []byte{byte(iflags), byte(iflags >> 8)}
-		_, err := s.rw.Write(buf)
-		return err
+		buf.WriteByte(byte(iflags))
+		buf.WriteByte(byte(iflags >> 8))
 	}
 
-	return nil
+	return s.muxWriter.WriteMsg(mux.MsgData, buf.Bytes())
 }
 
 // item flags for selector (matching upstream rsync.h ITEM_* defines)
@@ -364,14 +373,17 @@ const (
 // openModule handles opens within a single connected module.
 // It reads the file list from the server and opens the requested path.
 func (s *Session) openModule(name string) (fs.File, error) {
+	// fs.FS.Open must reject paths with leading slash
+	if strings.HasPrefix(name, "/") {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
+	}
+
 	// read file list from server
 	entries, err := s.readFileList()
 	if err != nil {
 		return nil, fmt.Errorf("read file list: %w", err)
 	}
 
-	// strip leading slash for path matching
-	name = strings.TrimPrefix(name, "/")
 	if name == "" || name == "." {
 		name = "."
 	}
@@ -387,7 +399,7 @@ func (s *Session) openModule(name string) (fs.File, error) {
 	case target.mode.IsDir():
 		// return directory entries (children of this directory)
 		children := filterChildren(entries, name)
-		return newModuleDirFile(children, name), nil
+		return newModuleDirFile(children, name, target.mode), nil
 
 	case target.mode.Type() == fs.ModeSymlink:
 		// return a symlink file
@@ -565,13 +577,13 @@ func (f *moduleFile) Read(p []byte) (int, error) {
 }
 
 func (f *moduleFile) ReadAt(p []byte, off int64) (int, error) {
-	if off >= int64(len(f.data)) {
-		return 0, io.EOF
-	}
-	if off < 0 {
+	if off < 0 || off >= int64(len(f.data)) {
 		return 0, io.EOF
 	}
 	n := copy(p, f.data[off:])
+	if off+int64(n) >= int64(len(f.data)) {
+		return n, io.EOF
+	}
 	return n, nil
 }
 
@@ -595,18 +607,19 @@ type moduleDirFile struct {
 	entries []fileListEntry
 	pos     int
 	name    string
+	mode    fs.FileMode
 }
 
 var _ fs.File = (*moduleDirFile)(nil)
 
-func newModuleDirFile(entries []fileListEntry, name string) *moduleDirFile {
-	return &moduleDirFile{entries: entries, name: name}
+func newModuleDirFile(entries []fileListEntry, name string, mode fs.FileMode) *moduleDirFile {
+	return &moduleDirFile{entries: entries, name: name, mode: mode}
 }
 
 func (d *moduleDirFile) Stat() (fs.FileInfo, error) {
 	return &fileInfo{
 		name:    baseName(d.name),
-		mode:    fs.ModeDir | 0o755,
+		mode:    d.mode,
 		size:    0,
 		modTime: time.Time{},
 	}, nil
@@ -761,7 +774,7 @@ func (s *Session) openRootMode(name string) (fs.File, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read file list for module %q: %w", modName, err)
 		}
-		return newModuleDirFile(filterChildren(entries, "."), modName), nil
+		return newModuleDirFile(filterChildren(entries, "."), modName, fs.ModeDir|0o755), nil
 	}
 
 	return session.openModule(modulePath)

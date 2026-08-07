@@ -14,9 +14,9 @@ import (
 )
 
 // setupTestServer creates a server goroutine connected via net.Pipe and returns the client side.
-// The server handles the handshake, sends the file list, and optionally handles file transfers.
+// The server handles the full protocol lifecycle via HandleConnection.
 // Callers should close the returned connection when done.
-func setupTestServer(t *testing.T, mod *ServerModule, handleFiles bool) net.Conn {
+func setupTestServer(t *testing.T, mod *ServerModule) net.Conn {
 	t.Helper()
 	srv, err := NewServer(mod)
 	if err != nil {
@@ -24,65 +24,12 @@ func setupTestServer(t *testing.T, mod *ServerModule, handleFiles bool) net.Conn
 	}
 
 	serverConn, clientConn := net.Pipe()
-
 	go func() {
 		defer serverConn.Close()
-
-		result, err := srv.HandleConnection(serverConn, HandleOptions{
+		_ = srv.HandleConnection(serverConn, HandleOptions{
 			LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5", "md4"}},
 		})
-		if err != nil {
-			return
-		}
-
-		// send file list
-		mw := mux.NewWriter(serverConn)
-		if err := sendFileList(mw, result.Module.FS, ".", result.Version, result.VarintFlistFlags); err != nil {
-			return
-		}
-
-		if !handleFiles {
-			return
-		}
-
-		// handle file transfer requests
-		mr := mux.NewReader(serverConn)
-		for {
-			// read selector (raw, not via mux)
-			var ndxBuf [1]byte
-			if _, err := serverConn.Read(ndxBuf[:]); err != nil {
-				return
-			}
-			var iflagsBuf [2]byte
-			if result.Version >= 29 {
-				if _, err := io.ReadFull(serverConn, iflagsBuf[:]); err != nil {
-					return
-				}
-			}
-
-			// figure out which file was requested by parsing the file list
-			entries, _ := walkFS(result.Module.FS, ".")
-			var targetFile string
-			for _, e := range entries {
-				if e.name != "." {
-					targetFile = e.name
-					break
-				}
-			}
-
-			f, err := result.Module.FS.Open(targetFile)
-			if err != nil {
-				return
-			}
-
-			if err := sendFile(mr, mw, f, result.Version); err != nil {
-				f.Close()
-				return
-			}
-			f.Close()
-		}
 	}()
-
 	return clientConn
 }
 
@@ -95,7 +42,7 @@ func TestClientOpen_File(t *testing.T) {
 		},
 	}
 
-	conn := setupTestServer(t, mod, true)
+	conn := setupTestServer(t, mod)
 	defer conn.Close()
 
 	client := &Client{Module: "testmod"}
@@ -137,7 +84,7 @@ func TestClientOpen_Directory(t *testing.T) {
 		},
 	}
 
-	conn := setupTestServer(t, mod, false)
+	conn := setupTestServer(t, mod)
 	defer conn.Close()
 
 	client := &Client{Module: "testmod"}
@@ -195,7 +142,7 @@ func TestClientOpen_ReadDirEndOfDirectory(t *testing.T) {
 		},
 	}
 
-	conn := setupTestServer(t, mod, false)
+	conn := setupTestServer(t, mod)
 	defer conn.Close()
 
 	client := &Client{Module: "testmod"}
@@ -251,7 +198,7 @@ func TestClientOpen_SubDirectory(t *testing.T) {
 		},
 	}
 
-	conn := setupTestServer(t, mod, false)
+	conn := setupTestServer(t, mod)
 	defer conn.Close()
 
 	client := &Client{Module: "testmod"}
@@ -289,7 +236,7 @@ func TestClientOpen_NotExist(t *testing.T) {
 		FS:   fstest.MapFS{"file.txt": {Data: []byte("hello")}},
 	}
 
-	conn := setupTestServer(t, mod, false)
+	conn := setupTestServer(t, mod)
 	defer conn.Close()
 
 	client := &Client{Module: "testmod"}
@@ -311,12 +258,12 @@ func TestClientOpen_Symlink(t *testing.T) {
 	mod := &ServerModule{
 		Name: "testmod",
 		FS: fstest.MapFS{
-			"target.txt":  {Data: []byte("target content")},
-			"link.txt":    {Data: []byte("target.txt"), Mode: fs.ModeSymlink | 0o777},
+			"target.txt": {Data: []byte("target content")},
+			"link.txt":   {Data: []byte("target.txt"), Mode: fs.ModeSymlink | 0o777},
 		},
 	}
 
-	conn := setupTestServer(t, mod, false)
+	conn := setupTestServer(t, mod)
 	defer conn.Close()
 
 	client := &Client{Module: "testmod"}
@@ -346,7 +293,7 @@ func TestClientOpen_EmptyFile(t *testing.T) {
 		FS:   fstest.MapFS{"empty.txt": {Data: []byte{}}},
 	}
 
-	conn := setupTestServer(t, mod, true)
+	conn := setupTestServer(t, mod)
 	defer conn.Close()
 
 	client := &Client{Module: "testmod"}
@@ -381,7 +328,7 @@ func TestClientOpen_LargeFile(t *testing.T) {
 		FS:   fstest.MapFS{"large.bin": {Data: fileData}},
 	}
 
-	conn := setupTestServer(t, mod, true)
+	conn := setupTestServer(t, mod)
 	defer conn.Close()
 
 	client := &Client{Module: "testmod"}
@@ -423,7 +370,7 @@ func TestClientOpen_RootModuleAccess(t *testing.T) {
 			serverConn, clientConn := net.Pipe()
 			go func() {
 				defer serverConn.Close()
-				_, _ = srv.HandleConnection(serverConn, HandleOptions{
+				_ = srv.HandleConnection(serverConn, HandleOptions{
 					LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5", "md4"}},
 				})
 			}()
@@ -484,41 +431,9 @@ func TestClientOpen_RootModuleFileAccess(t *testing.T) {
 			serverConn, clientConn := net.Pipe()
 			go func() {
 				defer serverConn.Close()
-				result, err := srv.HandleConnection(serverConn, HandleOptions{
+				_ = srv.HandleConnection(serverConn, HandleOptions{
 					LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5", "md4"}},
 				})
-				if err != nil {
-					return
-				}
-
-				mw := mux.NewWriter(serverConn)
-				mr := mux.NewReader(serverConn)
-				if err := sendFileList(mw, result.Module.FS, ".", result.Version, result.VarintFlistFlags); err != nil {
-					return
-				}
-
-				// read selector
-				var ndxBuf [1]byte
-				if _, err := serverConn.Read(ndxBuf[:]); err != nil {
-					return
-				}
-				var iflagsBuf [2]byte
-				if result.Version >= 29 {
-					if _, err := io.ReadFull(serverConn, iflagsBuf[:]); err != nil {
-						return
-					}
-				}
-
-				f, err := result.Module.FS.Open("file.txt")
-				if err != nil {
-					return
-				}
-
-				if err := sendFile(mr, mw, f, result.Version); err != nil {
-					f.Close()
-					return
-				}
-				f.Close()
 			}()
 			return clientConn, nil
 		},
@@ -656,64 +571,70 @@ func TestFilterChildren_SubDir(t *testing.T) {
 }
 
 // TestWriteNdx_Compressed verifies compressed NDX encoding matches upstream io.c write_ndx().
-// Each test case is independent (writeNdx takes prevNdx as a pointer, not static state).
+// Each test case is independent (writeNdx takes prevPositive/prevNegative as pointers).
 func TestWriteNdx_Compressed(t *testing.T) {
 	tests := []struct {
-		name      string
-		ndx       int
-		version   int
-		prevNdx   int32
-		wantPrev  int32
-		wantBytes []byte
+		name         string
+		ndx          int
+		version      int
+		prevPositive int32
+		prevNegative int32
+		wantPrevPos  int32
+		wantPrevNeg  int32
+		wantBytes    []byte
 	}{
 		// Proto < 30: plain int32 LE (no compression)
-		{"proto28_zero", 0, 28, 42, 42, []byte{0, 0, 0, 0}},
-		{"proto28_neg1", -1, 28, 42, 42, []byte{0xff, 0xff, 0xff, 0xff}},
+		{"proto28_zero", 0, 28, 42, 1, 42, 1, []byte{0, 0, 0, 0}},
+		{"proto28_neg1", -1, 28, 42, 1, 42, 1, []byte{0xff, 0xff, 0xff, 0xff}},
 
 		// Proto >= 30: compressed NDX
 		// NDX_DONE: single byte 0x00, no state change
-		{"ndx_done", -1, 30, 42, 42, []byte{0x00}},
+		{"ndx_done", -1, 30, 42, 1, 42, 1, []byte{0x00}},
 
 		// Single-byte diff (1-253)
-		{"first_positive", 0, 30, -1, 0, []byte{0x01}}, // diff = 0-(-1) = 1
-		{"diff_one", 1, 30, 0, 1, []byte{0x01}},        // diff = 1-0 = 1
-		{"diff_253", 254, 30, 1, 254, []byte{0xfd}},    // diff = 254-1 = 253
+		{"first_positive", 0, 30, -1, 1, 0, 1, []byte{0x01}}, // diff = 0-(-1) = 1
+		{"diff_one", 1, 30, 0, 1, 1, 1, []byte{0x01}},        // diff = 1-0 = 1
+		{"diff_253", 254, 30, 1, 1, 254, 1, []byte{0xfd}},    // diff = 254-1 = 253
 
 		// 2-byte diff (0 or 254-32767)
-		{"diff_zero", 100, 30, 100, 100, []byte{0xfe, 0x00, 0x00}},
-		{"diff_254", 256, 30, 2, 256, []byte{0xfe, 0x00, 0xfe}},
+		{"diff_zero", 100, 30, 100, 1, 100, 1, []byte{0xfe, 0x00, 0x00}},
+		{"diff_254", 256, 30, 2, 1, 256, 1, []byte{0xfe, 0x00, 0xfe}},
 
 		// 4-byte form (diff < 0 or diff > 32767)
-		{"diff_negative_4byte", 5, 30, 100, 5, []byte{0xfe, 0x80, 0x05, 0x00, 0x00}},
+		{"diff_negative_4byte", 5, 30, 100, 1, 5, 1, []byte{0xfe, 0x80, 0x05, 0x00, 0x00}},
 
 		// Negative indices: 0xFF prefix, then same diff encoding on abs value
 		// prev_negative starts at 1 (absolute value of last negative seen)
-		{"negative_first", -2, 30, 1, 2, []byte{0xff, 0x01}},  // abs=2, diff=2-1=1
-		{"negative_second", -3, 30, 2, 3, []byte{0xff, 0x01}}, // abs=3, diff=3-2=1
+		{"negative_first", -2, 30, -1, 1, -1, 2, []byte{0xff, 0x01}},  // abs=2, diff=2-1=1
+		{"negative_second", -3, 30, -1, 2, -1, 3, []byte{0xff, 0x01}}, // abs=3, diff=3-2=1
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			prevNdx := tt.prevNdx
-			err := writeNdx(&buf, tt.ndx, tt.version, &prevNdx)
+			prevPos := tt.prevPositive
+			prevNeg := tt.prevNegative
+			err := writeNdx(&buf, tt.ndx, tt.version, &prevPos, &prevNeg)
 			if err != nil {
 				t.Fatalf("writeNdx(%d) failed: %v", tt.ndx, err)
 			}
 			got := buf.Bytes()
 			if !bytes.Equal(got, tt.wantBytes) {
-				t.Errorf("writeNdx(%d, v=%d, prev=%d) = %v, want %v",
-					tt.ndx, tt.version, tt.prevNdx, got, tt.wantBytes)
+				t.Errorf("writeNdx(%d, v=%d) = %v, want %v",
+					tt.ndx, tt.version, got, tt.wantBytes)
 			}
-			if prevNdx != tt.wantPrev {
-				t.Errorf("writeNdx(%d) updated prevNdx to %d, want %d",
-					tt.ndx, prevNdx, tt.wantPrev)
+			if prevPos != tt.wantPrevPos {
+				t.Errorf("writeNdx(%d) updated prevPositive to %d, want %d",
+					tt.ndx, prevPos, tt.wantPrevPos)
+			}
+			if prevNeg != tt.wantPrevNeg {
+				t.Errorf("writeNdx(%d) updated prevNegative to %d, want %d",
+					tt.ndx, prevNeg, tt.wantPrevNeg)
 			}
 		})
 	}
 }
 
-// TestWriteSelector_ItemFlags verifies item flags match upstream rsync.h defines
-// and produce correct wire format (shortint LE).
+// TestWriteSelector_ItemFlags verifies item flags match upstream rsync.h defines and produce correct wire format (shortint LE).
 func TestWriteSelector_ItemFlags(t *testing.T) {
 	// Verify constants match upstream rsync.h
 	if itemTransfer != 1<<15 {
@@ -728,29 +649,42 @@ func TestWriteSelector_ItemFlags(t *testing.T) {
 	// ITEM_MISSING_DATA = 1<<16 is outside uint16 range (upstream comment: "used by log_formatted()")
 	// so only ITEM_TRANSFER is sent on the wire as shortint
 	// ndx=0 (diff from -1 = 1) + iflags=0x8000 (ITEM_TRANSFER only, LE = [0x00, 0x80])
-	// Expected: [0x01, 0x00, 0x80]
+	// Selector payload: [0x01, 0x00, 0x80], wrapped in MSG_DATA mux frame
 	var buf bytes.Buffer
-	s := &Session{rw: &buf, version: 30, prevNdx: -1}
+	s := &Session{rw: &buf, version: 30, prevPositive: -1, prevNegative: 1, muxWriter: mux.NewWriter(&buf)}
 	if err := s.writeSelector(0, itemTransfer); err != nil {
 		t.Fatalf("writeSelector failed: %v", err)
 	}
-	got := buf.Bytes()
+	// Read the mux frame and verify the payload
+	code, payload, err := mux.NewReader(&buf).ReadMsg()
+	if err != nil {
+		t.Fatalf("ReadMsg: %v", err)
+	}
+	if code != mux.MsgData {
+		t.Errorf("expected MSG_DATA, got code %d", code)
+	}
 	want := []byte{0x01, 0x00, 0x80}
-	if !bytes.Equal(got, want) {
-		t.Errorf("writeSelector(0, ITEM_TRANSFER) = %v, want %v", got, want)
+	if !bytes.Equal(payload, want) {
+		t.Errorf("writeSelector(0, ITEM_TRANSFER) payload = %v, want %v", payload, want)
 	}
 
 	// Proto < 29: no iflags sent, NDX is plain int32 LE
 	buf.Reset()
 	s.version = 28
-	s.prevNdx = -1
+	s.prevPositive = -1
 	if err := s.writeSelector(0, 0); err != nil {
 		t.Fatalf("writeSelector(proto=28) failed: %v", err)
 	}
-	got = buf.Bytes()
+	code, payload, err = mux.NewReader(&buf).ReadMsg()
+	if err != nil {
+		t.Fatalf("ReadMsg: %v", err)
+	}
+	if code != mux.MsgData {
+		t.Errorf("expected MSG_DATA, got code %d", code)
+	}
 	want = []byte{0, 0, 0, 0} // plain int32 LE for ndx=0
-	if !bytes.Equal(got, want) {
-		t.Errorf("writeSelector(proto=28) = %v, want %v", got, want)
+	if !bytes.Equal(payload, want) {
+		t.Errorf("writeSelector(proto=28) payload = %v, want %v", payload, want)
 	}
 }
 

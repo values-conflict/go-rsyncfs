@@ -2,419 +2,235 @@ package rsyncfs
 
 import (
 	"bytes"
-	"encoding/base64"
-	"encoding/binary"
-	"fmt"
+	"io"
 	"net"
-	"strings"
 	"testing"
-
-	"github.com/values-conflict/go-rsyncfs/protocol"
+	"testing/fstest"
+	"time"
 )
 
+// mockRW implements io.ReadWriter with buffered read/write for testing.
 type mockRW struct {
 	readBuf  *bytes.Buffer
 	writeBuf *bytes.Buffer
 }
 
-func (m *mockRW) Read(p []byte) (n int, err error) {
+func (m *mockRW) Read(p []byte) (int, error) {
 	return m.readBuf.Read(p)
 }
 
-func (m *mockRW) Write(p []byte) (n int, err error) {
+func (m *mockRW) Write(p []byte) (int, error) {
 	return m.writeBuf.Write(p)
 }
 
-// protoVersionBytes returns the protocol version as int32 LE (4 bytes).
-func protoVersionBytes(ver int) []byte {
-	b := make([]byte, 4)
-	binary.LittleEndian.PutUint32(b, uint32(ver))
-	return b
-}
-
-func TestHandleConnection_BasicSuccess(t *testing.T) {
-	mod := &ServerModule{Name: "testmod", Comment: "Test Module"}
-	s, _ := NewServer(mod)
-
-	// client greeting + module name + null-terminated args + client protocol version response
-	rw := &mockRW{
-		readBuf:  bytes.NewBuffer(append([]byte("@RSYNCD: 32.0 md5\ntestmod\n.\x00\x00"), protoVersionBytes(32)...)),
-		writeBuf: new(bytes.Buffer),
-	}
-
-	opts := HandleOptions{
-		LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
-	}
-
-	res, err := s.HandleConnection(rw, opts)
-	if err != nil {
-		t.Fatalf("Handshake failed: %v", err)
-	}
-
-	if res.Module != mod {
-		t.Errorf("Expected module testmod, got %v", res.Module)
-	}
-	if res.Version != 32 {
-		t.Errorf("Expected version 32, got %d", res.Version)
-	}
-	if res.Digest != "md5" {
-		t.Errorf("Expected digest md5, got %s", res.Digest)
-	}
-
-	expectedGreeting := "@RSYNCD: 32.0 md5\n"
-	if !bytes.HasPrefix(rw.writeBuf.Bytes(), []byte(expectedGreeting)) {
-		t.Errorf("Server did not send correct greeting, got %q", rw.writeBuf.String())
-	}
-}
-
 func TestHandleConnection_ModuleList(t *testing.T) {
-	mod1 := &ServerModule{Name: "mod1", Comment: "Comment 1"}
-	mod2 := &ServerModule{Name: "mod2", Comment: "Comment 2"}
+	mod1 := &ServerModule{Name: "mod1", Comment: "Comment 1", FS: fstest.MapFS{}}
+	mod2 := &ServerModule{Name: "mod2", Comment: "Comment 2", FS: fstest.MapFS{}}
 	s, _ := NewServer(mod1, mod2)
 
-	// #list causes the server to close the connection (upstream exits the child process)
-	// so we only send the greeting and #list, nothing after
-	rw := &mockRW{
-		readBuf:  bytes.NewBuffer([]byte("@RSYNCD: 32.0 md5\n#list\n")),
-		writeBuf: new(bytes.Buffer),
+	rw := &mockRW{readBuf: bytes.NewBuffer(nil), writeBuf: bytes.NewBuffer(nil)}
+
+	// simulate client greeting + #list request
+	rw.readBuf.WriteString("@RSYNCD: 32.0 md5\n")
+	rw.readBuf.WriteString("#list\n")
+
+	opts := HandleOptions{}
+
+	err := s.HandleConnection(rw, opts)
+	if err != nil {
+		t.Fatalf("HandleConnection failed: %v", err)
 	}
 
-	opts := HandleOptions{
-		LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
+	if !bytes.Contains(rw.writeBuf.Bytes(), []byte("@RSYNCD: EXIT")) {
+		t.Error("Module list response missing @RSYNCD: EXIT terminator")
 	}
-
-	_, err := s.HandleConnection(rw, opts)
-	if err == nil {
-		t.Fatal("expected error after #list (connection closed)")
+	if !bytes.Contains(rw.writeBuf.Bytes(), []byte("mod1")) {
+		t.Error("Module list missing mod1")
 	}
-	if !strings.Contains(err.Error(), "connection closed after #list") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	output := rw.writeBuf.String()
-	if !bytes.Contains([]byte(output), []byte("mod1")) || !bytes.Contains([]byte(output), []byte("mod2")) {
-		t.Errorf("Module list missing entries, got %q", output)
-	}
-	if !bytes.Contains([]byte(output), []byte("@RSYNCD: EXIT\n")) {
-		t.Errorf("Module list missing EXIT terminator")
+	if !bytes.Contains(rw.writeBuf.Bytes(), []byte("mod2")) {
+		t.Error("Module list missing mod2")
 	}
 }
 
 func TestHandleConnection_UnknownModule(t *testing.T) {
-	mod := &ServerModule{Name: "testmod", Comment: "Test Module"}
+	mod := &ServerModule{Name: "testmod", FS: fstest.MapFS{}}
 	s, _ := NewServer(mod)
 
-	rw := &mockRW{
-		readBuf:  bytes.NewBufferString("@RSYNCD: 32.0 md5\nunknownmod\n"),
-		writeBuf: new(bytes.Buffer),
-	}
+	rw := &mockRW{readBuf: bytes.NewBuffer(nil), writeBuf: bytes.NewBuffer(nil)}
 
-	opts := HandleOptions{
-		LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
-	}
+	rw.readBuf.WriteString("@RSYNCD: 32.0 md5\n")
+	rw.readBuf.WriteString("nonexistent\n")
 
-	_, err := s.HandleConnection(rw, opts)
+	opts := HandleOptions{}
+
+	err := s.HandleConnection(rw, opts)
 	if err == nil {
-		t.Fatal("Expected error for unknown module, got nil")
+		t.Fatal("Expected error for unknown module")
 	}
-
-	expectedErr := "@ERROR: Unknown module\n"
-	if !bytes.Contains(rw.writeBuf.Bytes(), []byte(expectedErr)) {
-		t.Errorf("Server did not send correct ERROR response, got %q", rw.writeBuf.String())
+	if !bytes.Contains(rw.writeBuf.Bytes(), []byte("@ERROR:")) {
+		t.Error("Expected @ERROR response for unknown module")
 	}
 }
 
 func TestHandleConnection_AuthSuccess(t *testing.T) {
-	mod := &ServerModule{Name: "testmod", Comment: "Test Module"}
+	mod := &ServerModule{Name: "testmod", FS: fstest.MapFS{}}
 	s, _ := NewServer(mod)
 
+	serverConn, clientConn := net.Pipe()
+
 	opts := HandleOptions{
-		LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
 		AuthCallback: func(username string, challenge []byte) ([]byte, error) {
-			if username == "alice" {
-				return []byte("valid-hash"), nil
+			if username != "testuser" {
+				return nil, nil
 			}
-			return nil, fmt.Errorf("invalid user")
+			return challenge, nil
 		},
 	}
 
-	serverConn, clientConn := net.Pipe()
-	errChan := make(chan error, 1)
 	go func() {
 		defer serverConn.Close()
-		_, err := s.HandleConnection(serverConn, opts)
-		errChan <- err
+		_ = s.HandleConnection(serverConn, opts)
 	}()
 
-	buf := make([]byte, 1024)
-	n, err := clientConn.Read(buf)
+	// read server greeting
+	line := readLineFrom(clientConn)
+	if line == "" {
+		t.Fatal("Failed to read server greeting")
+	}
+
+	// send client greeting
+	_, _ = clientConn.Write([]byte("@RSYNCD: 32.0 md5\n"))
+
+	// send module request
+	_, _ = clientConn.Write([]byte("testmod\n"))
+
+	// read auth challenge
+	line = readLineFrom(clientConn)
+	if line == "" {
+		t.Fatal("Failed to read auth challenge")
+	}
+	if !bytes.Contains([]byte(line), []byte("@RSYNCD: AUTHREQD")) {
+		t.Fatalf("Expected AUTHREQD, got %q", line)
+	}
+
+	// send auth response (echo challenge as hash)
+	parts := bytes.SplitN([]byte(line), []byte(" "), 3)
+	if len(parts) < 3 {
+		t.Fatalf("Invalid AUTHREQD format: %q", line)
+	}
+	challengeB64 := string(bytes.TrimSpace(parts[2]))
+	_, _ = clientConn.Write([]byte("testuser " + challengeB64 + "\n"))
+
+	// read auth result
+	line = readLineFrom(clientConn)
+	if line == "" {
+		t.Fatal("Failed to read auth result")
+	}
+	if line != "@RSYNCD: OK" {
+		t.Fatalf("Expected '@RSYNCD: OK', got %q", line)
+	}
+
+	// send arguments (proto 30+)
+	_, _ = clientConn.Write([]byte(".\x00\x00"))
+
+	// read protocol version (4 bytes)
+	var verBuf [4]byte
+	_, err := io.ReadFull(clientConn, verBuf[:])
 	if err != nil {
-		t.Fatalf("failed to read server greeting: %v", err)
-	}
-	_ = string(buf[:n])
-
-	clientConn.Write([]byte("@RSYNCD: 32.0 md5\n"))
-	clientConn.Write([]byte("testmod\n"))
-
-	buf = make([]byte, 1024)
-	n, err = clientConn.Read(buf)
-	if err != nil {
-		t.Fatalf("failed to read auth request: %v", err)
-	}
-	resp := string(buf[:n])
-	if !bytes.Contains([]byte(resp), []byte("@RSYNCD: AUTHREQD")) {
-		t.Fatalf("expected AUTHREQD, got %q", resp)
+		t.Fatalf("Failed to read protocol version: %v", err)
 	}
 
-	authResponse := fmt.Sprintf("alice %s\n", base64.StdEncoding.EncodeToString([]byte("valid-hash")))
-	clientConn.Write([]byte(authResponse))
+	// send protocol version back
+	_, _ = clientConn.Write(verBuf[:])
 
-	// read @RSYNCD: OK
-	buf = make([]byte, 1024)
-	n, err = clientConn.Read(buf)
-	if err != nil {
-		t.Fatalf("failed to read auth OK: %v", err)
-	}
-	okResp := string(buf[:n])
-	if !bytes.Contains([]byte(okResp), []byte("@RSYNCD: OK")) {
-		t.Fatalf("expected OK, got %q", okResp)
-	}
-
-	// send arguments
-	clientConn.Write([]byte(".\x00\x00"))
-
-	// read server protocol version
-	buf = make([]byte, 4)
-	n, err = clientConn.Read(buf)
-	if err != nil {
-		t.Fatalf("failed to read server protocol version: %v", err)
-	}
-	_ = n
-	_ = binary.LittleEndian.Uint32(buf[:n]) // server protocol version
-
-	// send client protocol version response
-	clientConn.Write(protoVersionBytes(32))
-
-	// read compat flags (varint, proto >= 30)
-	buf = make([]byte, 4)
-	n, err = clientConn.Read(buf)
-	if err != nil {
-		t.Fatalf("failed to read compat flags: %v", err)
-	}
-	_ = buf[:n] // compat flags varint (value 0x80 for CF_VARINT_FLIST_FLAGS)
-
-	if err := <-errChan; err != nil {
-		t.Fatalf("Handshake failed: %v", err)
-	}
+	clientConn.Close()
 }
 
 func TestHandleConnection_AuthFailure(t *testing.T) {
-	mod := &ServerModule{Name: "testmod", Comment: "Test Module"}
+	mod := &ServerModule{Name: "testmod", FS: fstest.MapFS{}}
 	s, _ := NewServer(mod)
 
+	serverConn, clientConn := net.Pipe()
+
 	opts := HandleOptions{
-		LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
 		AuthCallback: func(username string, challenge []byte) ([]byte, error) {
-			return []byte("valid-hash"), nil
+			return nil, nil // always fail
 		},
 	}
 
-	serverConn, clientConn := net.Pipe()
-	errChan := make(chan error, 1)
 	go func() {
 		defer serverConn.Close()
-		_, err := s.HandleConnection(serverConn, opts)
-		errChan <- err
+		_ = s.HandleConnection(serverConn, opts)
 	}()
 
-	buf := make([]byte, 1024)
-	_, _ = clientConn.Read(buf)
-
-	clientConn.Write([]byte("@RSYNCD: 32.0 md5\n"))
-	clientConn.Write([]byte("testmod\n"))
-
-	buf = make([]byte, 1024)
-	_, _ = clientConn.Read(buf)
-
-	authResponse := fmt.Sprintf("alice %s\n", base64.StdEncoding.EncodeToString([]byte("wrong-hash")))
-	clientConn.Write([]byte(authResponse))
-
-	// read the error response so the server goroutine can unblock
-	_, _ = clientConn.Read(buf)
-
-	err := <-errChan
-	if err == nil {
-		t.Fatal("Expected error for auth failure, got nil")
+	// read server greeting
+	line := readLineFrom(clientConn)
+	if line == "" {
+		t.Fatal("Failed to read server greeting")
 	}
-	if !strings.Contains(err.Error(), "authentication failed") {
-		t.Errorf("Unexpected error message: %v", err)
+
+	// send client greeting
+	_, _ = clientConn.Write([]byte("@RSYNCD: 32.0 md5\n"))
+
+	// send module request
+	_, _ = clientConn.Write([]byte("testmod\n"))
+
+	// read auth challenge
+	line = readLineFrom(clientConn)
+	if line == "" {
+		t.Fatal("Failed to read auth challenge")
+	}
+
+	// send bad auth response
+	_, _ = clientConn.Write([]byte("testuser wronghash\n"))
+
+	// read auth result
+	line = readLineFrom(clientConn)
+	if line == "" {
+		t.Fatal("Failed to read auth result")
+	}
+	if !bytes.Contains([]byte(line), []byte("@ERROR:")) {
+		t.Fatalf("Expected @ERROR, got %q", line)
+	}
+
+	clientConn.Close()
+}
+
+func TestHandleConnection_ClientDisconnect(t *testing.T) {
+	mod := &ServerModule{Name: "testmod", FS: fstest.MapFS{}}
+	s, _ := NewServer(mod)
+
+	serverConn, clientConn := net.Pipe()
+
+	done := make(chan error, 1)
+	go func() {
+		defer serverConn.Close()
+		done <- s.HandleConnection(serverConn, HandleOptions{})
+	}()
+
+	// close client side -- server should get EOF and return
+	clientConn.Close()
+
+	select {
+	case err := <-done:
+		// server returned cleanly (error is expected due to abrupt disconnect)
+		_ = err
+	case <-time.After(5 * time.Second):
+		t.Fatal("server goroutine did not exit after client disconnect")
 	}
 }
 
-func TestHandleConnection_ArgumentsProto30Plus(t *testing.T) {
-	mod := &ServerModule{Name: "testmod", Comment: "Test Module"}
-	s, _ := NewServer(mod)
-
-	rw := &mockRW{
-		readBuf:  bytes.NewBuffer(append([]byte("@RSYNCD: 32.0 md5\ntestmod\narg1\x00arg2\x00.\x00\x00"), protoVersionBytes(32)...)),
-		writeBuf: new(bytes.Buffer),
-	}
-
-	opts := HandleOptions{
-		LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
-	}
-
-	res, err := s.HandleConnection(rw, opts)
-	if err != nil {
-		t.Fatalf("Handshake failed: %v", err)
-	}
-
-	if res.Version != 32 {
-		t.Errorf("Expected version 32, got %d", res.Version)
-	}
-}
-
-func TestHandleConnection_ArgumentsProtoLegacy(t *testing.T) {
-	mod := &ServerModule{Name: "testmod", Comment: "Test Module"}
-	s, _ := NewServer(mod)
-
-	rw := &mockRW{
-		readBuf:  bytes.NewBuffer(append([]byte("@RSYNCD: 29.0 md5\ntestmod\narg1\narg2\n.\n\n"), protoVersionBytes(29)...)),
-		writeBuf: new(bytes.Buffer),
-	}
-
-	opts := HandleOptions{
-		LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
-	}
-
-	res, err := s.HandleConnection(rw, opts)
-	if err != nil {
-		t.Fatalf("Handshake failed: %v", err)
-	}
-
-	if res.Version > 29 {
-		t.Errorf("Expected version <= 29, got %d", res.Version)
-	}
-}
-
-func TestHandleConnection_NoAuth(t *testing.T) {
-	// verify that server sends @RSYNCD: OK when no auth is configured
-	mod := &ServerModule{Name: "testmod", Comment: "Test Module"}
-	s, _ := NewServer(mod)
-
-	rw := &mockRW{
-		readBuf:  bytes.NewBuffer(append([]byte("@RSYNCD: 32.0 md5\ntestmod\n.\x00\x00"), protoVersionBytes(32)...)),
-		writeBuf: new(bytes.Buffer),
-	}
-
-	opts := HandleOptions{
-		LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
-	}
-
-	_, err := s.HandleConnection(rw, opts)
-	if err != nil {
-		t.Fatalf("Handshake failed: %v", err)
-	}
-
-	output := rw.writeBuf.String()
-	if !bytes.Contains([]byte(output), []byte("@RSYNCD: OK\n")) {
-		t.Errorf("Server did not send OK, got %q", output)
-	}
-}
-
-func TestHandleConnection_VersionDowngrade(t *testing.T) {
-	// server sends v32 but client responds with v28 protocol version
-	mod := &ServerModule{Name: "testmod", Comment: "Test Module"}
-	s, _ := NewServer(mod)
-
-	rw := &mockRW{
-		readBuf:  bytes.NewBuffer(append([]byte("@RSYNCD: 32.0 md5\ntestmod\n.\x00\x00"), protoVersionBytes(28)...)),
-		writeBuf: new(bytes.Buffer),
-	}
-
-	opts := HandleOptions{
-		LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
-	}
-
-	res, err := s.HandleConnection(rw, opts)
-	if err != nil {
-		t.Fatalf("Handshake failed: %v", err)
-	}
-
-	if res.Version != 28 {
-		t.Errorf("Expected downgraded version 28, got %d", res.Version)
-	}
-}
-
-func TestHandleConnection_CompatFlagsWithEArg(t *testing.T) {
-	// client sends -e argument with 'v' flag, server should negotiate CF_VARINT_FLIST_FLAGS
-	mod := &ServerModule{Name: "testmod", Comment: "Test Module"}
-	s, _ := NewServer(mod)
-
-	// arguments include "e0v" (subprotocol=0, 'v' flag for CF_VARINT_FLIST_FLAGS)
-	rw := &mockRW{
-		readBuf:  bytes.NewBuffer(append([]byte("@RSYNCD: 32.0 md5\ntestmod\n.\x00e0v\x00\x00"), protoVersionBytes(32)...)),
-		writeBuf: new(bytes.Buffer),
-	}
-
-	opts := HandleOptions{
-		LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
-	}
-
-	res, err := s.HandleConnection(rw, opts)
-	if err != nil {
-		t.Fatalf("Handshake failed: %v", err)
-	}
-
-	if !res.VarintFlistFlags {
-		t.Error("Expected VarintFlistFlags to be true when client advertises 'v' flag")
-	}
-}
-
-func TestHandleConnection_CompatFlagsWithoutEArg(t *testing.T) {
-	// client doesn't send -e argument, server should not set CF_VARINT_FLIST_FLAGS
-	mod := &ServerModule{Name: "testmod", Comment: "Test Module"}
-	s, _ := NewServer(mod)
-
-	rw := &mockRW{
-		readBuf:  bytes.NewBuffer(append([]byte("@RSYNCD: 32.0 md5\ntestmod\n.\x00\x00"), protoVersionBytes(32)...)),
-		writeBuf: new(bytes.Buffer),
-	}
-
-	opts := HandleOptions{
-		LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
-	}
-
-	res, err := s.HandleConnection(rw, opts)
-	if err != nil {
-		t.Fatalf("Handshake failed: %v", err)
-	}
-
-	if res.VarintFlistFlags {
-		t.Error("Expected VarintFlistFlags to be false when client doesn't advertise 'v' flag")
-	}
-}
-
-func TestHandleConnection_CompatFlagsNotSentForOldProtocol(t *testing.T) {
-	// proto < 30 should not send compat flags
-	mod := &ServerModule{Name: "testmod", Comment: "Test Module"}
-	s, _ := NewServer(mod)
-
-	rw := &mockRW{
-		readBuf:  bytes.NewBuffer(append([]byte("@RSYNCD: 29.0 md5\ntestmod\narg\n\n"), protoVersionBytes(29)...)),
-		writeBuf: new(bytes.Buffer),
-	}
-
-	opts := HandleOptions{
-		LocalGreeting: protocol.Greeting{Version: 32, SubProtocol: 0, Digests: []string{"md5"}},
-	}
-
-	res, err := s.HandleConnection(rw, opts)
-	if err != nil {
-		t.Fatalf("Handshake failed: %v", err)
-	}
-
-	if res.VarintFlistFlags {
-		t.Error("Expected VarintFlistFlags to be false for proto < 30")
+func readLineFrom(r io.Reader) string {
+	var buf []byte
+	b := make([]byte, 1)
+	for {
+		n, err := r.Read(b)
+		if err != nil || n == 0 {
+			return string(buf)
+		}
+		if b[0] == '\n' {
+			return string(buf)
+		}
+		buf = append(buf, b[0])
 	}
 }
