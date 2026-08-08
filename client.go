@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/md5"
 	"encoding/base64"
-	"encoding/binary"
 	"fmt"
 	"hash"
 	"io"
@@ -231,26 +230,9 @@ func (c Client) Connect(rw io.ReadWriter) (*Session, error) {
 		return nil, fmt.Errorf("send arguments: %w", err)
 	}
 
-	// --- Phase 4: Protocol Version Exchange (binary) ---
-
-	// server sends its protocol version as int32 LE
-	var remoteProtoBuf [4]byte
-	if _, err := io.ReadFull(rw, remoteProtoBuf[:]); err != nil {
-		return nil, fmt.Errorf("read remote protocol version: %w", err)
-	}
-	remoteProto := int32(binary.LittleEndian.Uint32(remoteProtoBuf[:]))
-	if int(remoteProto) < version {
-		s.version = int(remoteProto)
-	}
-
-	// we send our protocol version back
-	var localProtoBuf [4]byte
-	binary.LittleEndian.PutUint32(localProtoBuf[:], uint32(s.version))
-	if _, err := rw.Write(localProtoBuf[:]); err != nil {
-		return nil, fmt.Errorf("send local protocol version: %w", err)
-	}
-
 	// --- Compat Flags Exchange (proto >= 30) ---
+	// the binary protocol version exchange (write_int/read_int) is skipped when the greeting was already exchanged (Phase 1), since remote_protocol is already set
+	// the compat flags exchange is separate and always happens for proto >= 30
 	// server sends resolved compat flags as varint
 	if s.version >= 30 {
 		compatFlags, err := protocol.ReadVarint(rw)
@@ -364,8 +346,15 @@ func doListRequest(connectFunc func(string) (io.ReadWriter, error), greet protoc
 }
 
 // sendArguments sends the rsync command-line arguments to the server.
+// The arguments mimic what the real rsync client sends: --server --sender flags . e0v
 func (s *Session) sendArguments(version int) error {
-	args := []string{"."}
+	// build arguments matching upstream server_options() + args
+	// --server: tells the server we're using the daemon protocol
+	// --sender: tells the server to act as the sender (we're pulling files)
+	// -vlHogDtprz: basic transfer flags matching -avz plus hardlinks/devices
+	// .: the path on the server to transfer from
+	// e0v: compat flags (subprotocol=0, CF_VARINT_FLIST_FLAGS)
+	args := []string{"--server", "--sender", "-vlHogDtprz", "."}
 
 	// advertise compat feature flags via -e argument (proto >= 30)
 	// "e0v" means subprotocol=0 with 'v' flag (CF_VARINT_FLIST_FLAGS)

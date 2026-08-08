@@ -337,7 +337,7 @@ func (s *Session) Open(name string) (fs.File, error)
 
 ## Phase 3: Integration & Polish
 
-### Task 11 -- Upstream rsync integration tests (`integration_test.go`)
+### ~~Task 11 -- Upstream rsync integration tests (`integration_test.go`)~~
 
 **Goal:** Tests that connect our library to the real `rsync` binary.  Skipped with `-short` or when `rsync` is not found.
 

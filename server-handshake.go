@@ -3,7 +3,6 @@ package rsyncfs
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"strings"
@@ -218,23 +217,9 @@ Loop:
 		clientInfo = extractClientInfo(args)
 	}
 
-	// --- Phase 4: Protocol Version Exchange (binary) ---
-
-	var protoBuf [4]byte
-	binary.LittleEndian.PutUint32(protoBuf[:], uint32(version))
-	if _, err := rw.Write(protoBuf[:]); err != nil {
-		return nil, fmt.Errorf("send protocol version: %w", err)
-	}
-
-	if _, err := io.ReadFull(rw, protoBuf[:]); err != nil {
-		return nil, fmt.Errorf("read client protocol version: %w", err)
-	}
-	clientProto := int(binary.LittleEndian.Uint32(protoBuf[:]))
-	if clientProto < version {
-		version = clientProto
-	}
-
-	// Compat Flags Exchange (proto >= 30)
+	// --- Compat Flags Exchange (proto >= 30) ---
+	// the binary protocol version exchange (write_int/read_int) is skipped when the greeting was already exchanged (Phase 1), since remote_protocol is already set
+	// the compat flags exchange is separate and always happens for proto >= 30
 	var compatFlags int
 	if version >= 30 {
 		compatFlags = resolveCompatFlags(clientInfo)

@@ -7,6 +7,8 @@ import (
 	"testing"
 	"testing/fstest"
 	"time"
+
+	"github.com/values-conflict/go-rsyncfs/protocol"
 )
 
 // mockRW implements io.ReadWriter with buffered read/write for testing.
@@ -133,15 +135,13 @@ func TestHandleConnection_AuthSuccess(t *testing.T) {
 	// send arguments (proto 30+)
 	_, _ = clientConn.Write([]byte(".\x00\x00"))
 
-	// read protocol version (4 bytes)
-	var verBuf [4]byte
-	_, err := io.ReadFull(clientConn, verBuf[:])
+	// read compat flags varint (proto >= 30)
+	// the binary protocol version exchange is skipped when greeting was exchanged
+	compatFlags, err := protocol.ReadVarint(clientConn)
 	if err != nil {
-		t.Fatalf("Failed to read protocol version: %v", err)
+		t.Fatalf("Failed to read compat flags: %v", err)
 	}
-
-	// send protocol version back
-	_, _ = clientConn.Write(verBuf[:])
+	t.Logf("compat flags: 0x%x", compatFlags)
 
 	clientConn.Close()
 }

@@ -104,9 +104,9 @@ For protocol ≥ 30, the client can include a `-e` argument with feature flags i
 
 Each side reads the other's value and uses min(local, remote) as the negotiated version.
 
-Upstream skips this step for daemon connections (where the version was already negotiated in Phase 1).  Our implementation always performs this exchange.
+**This step is skipped for daemon connections** (where the version was already negotiated in Phase 1 via the greeting exchange).  It is only used for SSH/rsh transport connections, where there is no greeting exchange and `remote_protocol` starts at 0.  In upstream, `remote_protocol` is set during the greeting parse (`sscanf(buf, "@RSYNCD: %d.%d", &remote_protocol, &remote_sub)` in `clientserver.c`), so the `if (remote_protocol == 0)` guard in `setup_protocol()` (compat.c:600) is false for daemon connections and the binary exchange is skipped.
 
-### Compat Flags Exchange (protocol ≥ 30, after version exchange)
+### Compat Flags Exchange (protocol ≥ 30)
 
 After the binary protocol version exchange, the server sends resolved compat flags as a `varint` to the client (or `write_byte` for pre-release `V` flag support).  The client reads this as a `varint`.
 
