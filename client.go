@@ -98,6 +98,7 @@ type Session struct {
 	prevNegative     int32                               // tracks previous negative NDX for compressed delta encoding
 	varintFlistFlags bool                                // true when CF_VARINT_FLIST_FLAGS is negotiated
 	fileList         []fileListEntry                     // cached file list from server (populated on first Open)
+	phaseDone        bool                                // true after phase exchange with server is complete
 }
 
 var _ fs.FS = (*Session)(nil) // compile-time interface check

@@ -342,6 +342,34 @@ func writeNdx(w io.Writer, ndx int, version int, prevPositive, prevNegative *int
 	return err
 }
 
+// phaseExchange performs the NDX_DONE round-trip exchange with the server after
+// the file list is received. For proto >= 29, there are 2 phases; for older,
+// just 1. In each phase, the client sends NDX_DONE and reads the server's
+// NDX_DONE response.
+func (s *Session) phaseExchange() error {
+	maxPhase := 1
+	if s.version >= 29 {
+		maxPhase = 2
+	}
+
+	for phase := 0; phase < maxPhase; phase++ {
+		// Send NDX_DONE to server
+		if err := s.muxWriter.WriteMsg(mux.MsgData, []byte{0}); err != nil {
+			return fmt.Errorf("write phase ndx done: %w", err)
+		}
+		// Read server's NDX_DONE response
+		code, _, err := s.muxReader.ReadMsg()
+		if err != nil {
+			return fmt.Errorf("read phase ndx done: %w", err)
+		}
+		if code != mux.MsgData {
+			return fmt.Errorf("expected MSG_DATA for phase exchange, got code %d", code)
+		}
+	}
+
+	return nil
+}
+
 // writeSelector sends a file selector to the server, requesting a specific file for transfer.
 // The selector consists of a compressed NDX followed by item flags (shortint for proto >= 29).
 // Like all data in Phase 4, selectors are sent as MSG_DATA mux frames (not raw bytes).
@@ -382,6 +410,14 @@ func (s *Session) openModule(name string) (fs.File, error) {
 	entries, err := s.readFileList()
 	if err != nil {
 		return nil, fmt.Errorf("read file list: %w", err)
+	}
+
+	// perform phase exchange with server (only once per connection)
+	if !s.phaseDone {
+		if err := s.phaseExchange(); err != nil {
+			return nil, fmt.Errorf("phase exchange: %w", err)
+		}
+		s.phaseDone = true
 	}
 
 	if name == "" || name == "." {

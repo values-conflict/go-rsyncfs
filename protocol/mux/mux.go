@@ -67,13 +67,43 @@ func (w *Writer) WriteMsg(code uint8, payload []byte) error {
 
 // Reader reads multiplexed frames from an [io.Reader].
 type Reader struct {
-	r io.Reader
+	r       io.Reader
+	buf     []byte // leftover payload bytes from the last ReadMsg
+	bufOff  int    // current offset into buf
 }
 
 func NewReader(r io.Reader) *Reader { return &Reader{r: r} }
 
+// PushBuf pushes leftover payload bytes back into the reader's buffer.
+// The next ReadMsg will return these bytes before reading a new frame.
+// This supports streaming reads from a single mux frame (e.g., multiple
+// NDX_DONE values batched by the upstream iobuf system).
+func (r *Reader) PushBuf(buf []byte, off int) {
+	if off < len(buf) {
+		r.buf = buf
+		r.bufOff = off
+	}
+}
+
+// ClearBuf discards any leftover bytes in the buffer.
+// Use this after the phase exchange to ensure file selectors
+// are read from fresh frames.
+func (r *Reader) ClearBuf() {
+	r.buf = nil
+	r.bufOff = 0
+}
+
 // ReadMsg reads the next multiplexed frame and returns its message code, payload bytes, and any error.
+// If the reader has leftover bytes from a previous frame, those are returned first.
 func (r *Reader) ReadMsg() (code uint8, payload []byte, err error) {
+	// Return leftover bytes from previous frame
+	if r.buf != nil && r.bufOff < len(r.buf) {
+		leftover := r.buf[r.bufOff:]
+		r.buf = nil
+		r.bufOff = 0
+		return MsgData, leftover, nil
+	}
+
 	var hdr [4]byte
 	if _, err = io.ReadFull(r.r, hdr[:]); err != nil {
 		return 0, nil, err

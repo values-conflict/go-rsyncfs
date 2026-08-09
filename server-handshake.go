@@ -69,30 +69,89 @@ func (s *Server) HandleConnection(rw io.ReadWriter, opts HandleOptions) error {
 		return fmt.Errorf("walk fs: %w", err)
 	}
 
-	// --- File Transfer ---
-	// Handle file transfer requests (selectors are MSG_DATA mux frames).
-	// The client sends selectors for files it wants, or NDX_DONE when finished.
+	// --- Phase Exchange + Selector Loop ---
+	// After the file list, the client and server exchange NDX_DONE markers to synchronize phases.
+	// For proto >= 29, there are 2 phases; for older, just 1.
+	// In each phase, the client sends NDX_DONE, the server reads it and responds with its own NDX_DONE.
+	// After the phase exchange completes, the client sends file selectors (or NDX_DONE if no files to transfer).
+	// The server reads selectors, sends file data, and loops until the client sends a final NDX_DONE that exceeds maxPhase.
+	maxPhase := 1
+	if result.Version >= 29 {
+		maxPhase = 2
+	}
+
 	ndx := newNdxState()
+	phase := 0
 	for {
 		sel, err := ndx.readSelector(mr, result.Version)
 		if err != nil {
 			return nil // connection closed or read error
 		}
-		if sel.ndx < 0 || int(sel.ndx) >= len(entries) {
-			return nil // NDX_DONE or invalid selector, exit cleanly
+		if sel.ndx < 0 {
+			// NDX_DONE: phase transition or end of transfer
+			phase++
+			if phase > maxPhase {
+				// Clear any leftover buffer bytes from the phase exchange so that the first file selector reads from a fresh frame.
+				mr.ClearBuf()
+				break
+			}
+			if err := mw.WriteMsg(mux.MsgData, []byte{0}); err != nil {
+				return fmt.Errorf("write ndx done: %w", err)
+			}
+			continue
+		}
+		if int(sel.ndx) >= len(entries) {
+			return nil // invalid selector, exit cleanly
 		}
 
-		f, err := result.Module.FS.Open(entries[sel.ndx].name)
+		entry := entries[sel.ndx]
+		// Directories don't need file data transfer
+		if entry.mode.IsDir() {
+			continue
+		}
+		// Only transfer files with ITEM_TRANSFER flag set (0x8000)
+		if sel.iflags&0x8000 == 0 {
+			continue
+		}
+
+		f, err := result.Module.FS.Open(entry.name)
 		if err != nil {
-			return fmt.Errorf("open %q: %w", entries[sel.ndx].name, err)
+			return fmt.Errorf("open %q: %w", entry.name, err)
 		}
 
 		if err := sendFile(mr, mw, f, result.Version); err != nil {
 			f.Close()
-			return fmt.Errorf("send file %q: %w", entries[sel.ndx].name, err)
+			return fmt.Errorf("send file %q: %w", entry.name, err)
 		}
 		f.Close()
 	}
+
+	// --- Final Goodbye Exchange ---
+	// Server writes NDX_DONE to signal end of transfer, then reads the
+	// client's final NDX_DONE. For proto >= 31, there's an extra
+	// NDX_DONE round-trip (matching read_final_goodbye in upstream).
+	if err := mw.WriteMsg(mux.MsgData, []byte{0}); err != nil {
+		return nil // connection already closed, don't treat as error
+	}
+
+	if result.Version >= 29 {
+		_, err := ndx.readSelector(mr, result.Version)
+		if err != nil {
+			return nil // connection closed
+		}
+		if result.Version >= 31 {
+			// Extra NDX_DONE round-trip for proto >= 31
+			if err := mw.WriteMsg(mux.MsgData, []byte{0}); err != nil {
+				return nil
+			}
+			_, err = ndx.readSelector(mr, result.Version)
+			if err != nil {
+				return nil
+			}
+		}
+	}
+
+	return nil
 }
 
 // handshakeResult contains the outcome of a successful server handshake.

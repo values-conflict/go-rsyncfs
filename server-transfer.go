@@ -293,6 +293,8 @@ type selector struct {
 // readSelector reads a file selector from the mux stream.
 // Selectors are sent as MSG_DATA frames containing compressed NDX + item flags.
 // The NDX is delta-encoded, so the ndxState is maintained across calls.
+// For NDX_DONE (phase exchange), leftover bytes are pushed back to support streaming reads from batched frames.
+// For regular selectors, leftover bytes are discarded to avoid interfering with subsequent protocol messages.
 func (s *ndxState) readSelector(r *mux.Reader, version int) (*selector, error) {
 	code, payload, err := r.ReadMsg()
 	if err != nil {
@@ -328,6 +330,13 @@ func (s *ndxState) readSelector(r *mux.Reader, version int) (*selector, error) {
 	iflags := 0
 	if version >= 29 && off+2 <= len(payload) {
 		iflags = int(payload[off]) | int(payload[off+1])<<8
+		off += 2
+	}
+
+	// Only push back leftover bytes for NDX_DONE (phase exchange).
+	// For regular file selectors, discard leftovers to avoid interfering with delta stream reads in sendFile.
+	if ndx < 0 {
+		r.PushBuf(payload, off)
 	}
 
 	return &selector{ndx: ndx, iflags: iflags, version: version}, nil

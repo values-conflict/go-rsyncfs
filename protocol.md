@@ -135,12 +135,12 @@ When `CF_VARINT_FLIST_FLAGS` is negotiated (via the `v` compat flag), both sides
 A **vstring** is encoded as: `length : uint8` followed by `data : raw[length]`.  If the length byte has the high bit set (`len & 0x80`), the actual length is `(len & 0x7F) * 256 + next_byte`.
 
 The exchange order is:
-1. **Server → Client:** checksum list vstring (e.g., `"md5\0md4\0"` with null-separated names)
+1. **Server → Client:** checksum list vstring (e.g., `"md5 md4"` with space-separated names)
 2. **Server → Client:** compression list vstring (only if compression is enabled; otherwise skipped)
 3. **Client → Server:** checksum list vstring
 4. **Client → Server:** compression list vstring (only if server sent one; otherwise skipped)
 
-The null-separated names use `\0` as the delimiter within the vstring.  Each side picks the first algorithm in the **client's list** that also appears in the server's list (client preference wins).
+The names within the vstring are space-separated (e.g., `"md5 md4"`).  Each side picks the first algorithm in the **client's list** that also appears in the server's list (client preference wins).
 
 ### Checksum Seed Exchange
 
@@ -311,9 +311,27 @@ For cases 2 and 3, encode the diff:
 
 For `0xFF` path, negate the final result before returning.
 
-### File Selector Protocol (after file list transfer)
+### Phase Exchange (after file list transfer)
 
-After the file list is complete (NDX_DONE sent), the client sends **selectors** to request specific files for transfer.  Each selector is sent as a **`MSG_DATA` mux frame** containing:
+After the file list is complete (NDX_DONE sent), the client and server enter a **phase exchange** before the selector loop begins.  Both sides run an identical loop:
+
+1. Read NDX (via `read_ndx` or `read_ndx_and_attrs`)
+2. If `NDX_DONE`: increment `phase`, if `phase > maxPhase` break, else write `NDX_DONE` and continue
+3. Otherwise: process the selector (file transfer request)
+
+The `maxPhase` is **2** for `protocol >= 29` and **1** for older protocols.  The phase exchange ensures both sides are synchronized before file transfers begin.
+
+**Sequence for proto >= 29:**
+- Client reads NDX_DONE from server's file list → phase=1, writes NDX_DONE
+- Server reads client's NDX_DONE → phase=1, writes NDX_DONE
+- Client reads server's NDX_DONE → phase=2, writes NDX_DONE
+- Server reads client's NDX_DONE → phase=2, writes NDX_DONE
+- Client reads server's NDX_DONE → phase=3 > maxPhase=2, exits loop
+- Server then reads selectors (or NDX_DONE if no files to transfer)
+
+### File Selector Protocol (after phase exchange)
+
+After the phase exchange, the client sends **selectors** to request specific files for transfer.  Each selector is sent as a **`MSG_DATA` mux frame** containing:
 
 ```
 ndx       : compressed NDX (or int32 LE for proto < 30)
@@ -415,6 +433,18 @@ sum2[i] : raw[s2length]        // strong hash digest length (MD4/MD5 = 16, SHA-2
 - `MSG_SUCCESS : int32 ndx` -- file transfer completed successfully
 - `MSG_NO_SEND : int32 ndx` -- sender failed to open requested file
 - `MSG_REDO : int32 ndx` -- request to reprocess a file list index
+
+### Final Goodbye Protocol
+
+After the selector loop ends (client's phase exceeds maxPhase), the server writes a final `NDX_DONE` and then reads the client's final `NDX_DONE` (via `read_final_goodbye` in upstream).
+
+**For proto < 29:** server reads a simple `read_int(f_in)` and verifies it equals `NDX_DONE`.
+
+**For proto >= 29:** server reads via `read_ndx_and_attrs(f_in, f_out, ...)` and verifies `NDX_DONE`.
+
+**For proto >= 31:** after reading the first `NDX_DONE`, the server writes its own `NDX_DONE` back, then reads another `NDX_DONE` from the client (extra round-trip).
+
+This exchange cleanly terminates the data transfer before the connection closes.
 
 ## Integer Encoding Formats (all little-endian)
 
