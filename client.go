@@ -234,12 +234,35 @@ func (c Client) Connect(rw io.ReadWriter) (*Session, error) {
 	// the binary protocol version exchange (write_int/read_int) is skipped when the greeting was already exchanged (Phase 1), since remote_protocol is already set
 	// the compat flags exchange is separate and always happens for proto >= 30
 	// server sends resolved compat flags as varint
+	var compatFlags int32
 	if s.version >= 30 {
-		compatFlags, err := protocol.ReadVarint(rw)
+		compatFlags, err = protocol.ReadVarint(rw)
 		if err != nil {
 			return nil, fmt.Errorf("read compat flags: %w", err)
 		}
 		s.varintFlistFlags = (compatFlags & cfVarintFlistFlags) != 0
+	}
+
+	// --- Checksum Negotiation (when CF_VARINT_FLIST_FLAGS is set) ---
+	if s.varintFlistFlags {
+		// read server's checksum list vstring
+		serverChecksums, err := readVstring(rw)
+		if err != nil {
+			return nil, fmt.Errorf("read server checksum list: %w", err)
+		}
+
+		// send client's checksum list vstring (space-separated names)
+		clientChecksums := "md5 md4"
+		if err := writeVstring(rw, clientChecksums); err != nil {
+			return nil, fmt.Errorf("send client checksum list: %w", err)
+		}
+		_ = serverChecksums // negotiated checksum would be stored here
+
+		// read checksum seed from server (4 bytes LE)
+		var seedBuf [4]byte
+		if _, err := io.ReadFull(rw, seedBuf[:]); err != nil {
+			return nil, fmt.Errorf("read checksum seed: %w", err)
+		}
 	}
 
 	// --- Switch to multiplexed I/O ---
@@ -467,3 +490,38 @@ func (r *rootDir) ReadDir(n int) ([]fs.DirEntry, error) {
 }
 
 func (r *rootDir) Close() error { return nil }
+
+// writeVstring writes a vstring (variable-length string) to w.
+func writeVstring(w io.Writer, s string) error {
+	buf := make([]byte, 0, len(s)+2)
+	if len(s) < 128 {
+		buf = append(buf, byte(len(s)))
+	} else {
+		buf = append(buf, byte(0x80|(len(s)>>8)&0x7F), byte(len(s)))
+	}
+	buf = append(buf, s...)
+	_, err := w.Write(buf)
+	return err
+}
+
+// readVstring reads a vstring from r and returns the string data.
+func readVstring(r io.Reader) (string, error) {
+	var b [1]byte
+	if _, err := r.Read(b[:]); err != nil {
+		return "", err
+	}
+	length := int(b[0])
+	if length&0x80 != 0 {
+		if _, err := r.Read(b[:]); err != nil {
+			return "", err
+		}
+		length = ((length & 0x7F) << 8) | int(b[0])
+	}
+	data := make([]byte, length)
+	if length > 0 {
+		if _, err := io.ReadFull(r, data); err != nil {
+			return "", err
+		}
+	}
+	return string(data), nil
+}

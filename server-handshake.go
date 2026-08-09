@@ -3,9 +3,12 @@ package rsyncfs
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"io"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/values-conflict/go-rsyncfs/protocol"
 	"github.com/values-conflict/go-rsyncfs/protocol/mux"
@@ -66,7 +69,9 @@ func (s *Server) HandleConnection(rw io.ReadWriter, opts HandleOptions) error {
 		return fmt.Errorf("walk fs: %w", err)
 	}
 
-	// handle file transfer requests (selectors are MSG_DATA mux frames)
+	// --- File Transfer ---
+	// Handle file transfer requests (selectors are MSG_DATA mux frames).
+	// The client sends selectors for files it wants, or NDX_DONE when finished.
 	ndx := newNdxState()
 	for {
 		sel, err := ndx.readSelector(mr, result.Version)
@@ -74,7 +79,7 @@ func (s *Server) HandleConnection(rw io.ReadWriter, opts HandleOptions) error {
 			return nil // connection closed or read error
 		}
 		if sel.ndx < 0 || int(sel.ndx) >= len(entries) {
-			return nil // invalid selector, exit cleanly
+			return nil // NDX_DONE or invalid selector, exit cleanly
 		}
 
 		f, err := result.Module.FS.Open(entries[sel.ndx].name)
@@ -92,10 +97,11 @@ func (s *Server) HandleConnection(rw io.ReadWriter, opts HandleOptions) error {
 
 // handshakeResult contains the outcome of a successful server handshake.
 type handshakeResult struct {
-	Module           *ServerModule
-	Version          int
-	Digest           string
-	VarintFlistFlags bool
+	Module             *ServerModule
+	Version            int
+	Digest             string
+	VarintFlistFlags   bool
+	NegotiatedChecksum string // empty when CF_VARINT_FLIST_FLAGS is not set
 }
 
 // doHandshake runs Phases 1-4 of the rsync protocol and returns the result.
@@ -228,11 +234,39 @@ Loop:
 		}
 	}
 
+	// --- Checksum Negotiation (when CF_VARINT_FLIST_FLAGS is set) ---
+	// when the 'v' compat flag is negotiated, both sides exchange checksum algorithm lists as vstrings
+	var negotiatedChecksum string
+	if (compatFlags & cfVarintFlistFlags) != 0 {
+		// server sends its checksum list as a vstring (space-separated names)
+		serverChecksums := "md5 md4"
+		if err := writeVstring(rw, serverChecksums); err != nil {
+			return nil, fmt.Errorf("send checksum list: %w", err)
+		}
+
+		// server reads the client's checksum list as a vstring
+		clientChecksums, err := readVstring(rw)
+		if err != nil {
+			return nil, fmt.Errorf("read client checksum list: %w", err)
+		}
+
+		// pick the first algorithm in the client's list that the server also supports
+		negotiatedChecksum = negotiateChecksum(clientChecksums, serverChecksums)
+	}
+
+	// --- Checksum Seed Exchange ---
+	// server sends a random seed for the block checksum algorithm
+	checksumSeed := int32(time.Now().Unix()) ^ int32(os.Getpid()<<6)
+	if err := writeInt32LE(rw, checksumSeed); err != nil {
+		return nil, fmt.Errorf("send checksum seed: %w", err)
+	}
+
 	return &handshakeResult{
-		Module:           selectedModule,
-		Version:          version,
-		Digest:           digest,
-		VarintFlistFlags: (compatFlags & cfVarintFlistFlags) != 0,
+		Module:             selectedModule,
+		Version:            version,
+		Digest:             digest,
+		VarintFlistFlags:   (compatFlags & cfVarintFlistFlags) != 0,
+		NegotiatedChecksum: negotiatedChecksum,
 	}, nil
 }
 
@@ -298,12 +332,14 @@ func readDelimitedArgs(rw io.Reader, delim byte) ([]string, error) {
 	return args, nil
 }
 
-// extractClientInfo extracts the client_info string from the -e argument.
-// The format is "e<version_sub><flags>" where flags are single characters.
+// extractClientInfo extracts the client_info string from the combined short-options argument.
+// The client embeds the feature flags as "e<version_sub><flags>" within a combined short-options argument like "-vlogDtpr.eiLsfxCIvu".
+// The 'e' char is part of the combined flags, and everything after it is the client_info string.
 func extractClientInfo(args []string) string {
 	for _, arg := range args {
-		if len(arg) >= 2 && arg[0] == 'e' {
-			return arg[1:]
+		// look for 'e' embedded in combined short options (e.g., "-vle.ifxCIvu")
+		if idx := strings.IndexByte(arg, 'e'); idx >= 0 && len(arg) > idx+1 {
+			return arg[idx+1:]
 		}
 	}
 	return ""
@@ -338,4 +374,29 @@ func resolveCompatFlags(clientInfo string) int {
 	}
 
 	return flags
+}
+
+// negotiateChecksum picks the first algorithm in the client's list that the server also supports.
+// Both lists are space-separated strings.
+func negotiateChecksum(clientList, serverList string) string {
+	clientAlgos := strings.Fields(clientList)
+	serverSet := make(map[string]struct{})
+	for _, a := range strings.Fields(serverList) {
+		serverSet[a] = struct{}{}
+	}
+	for _, a := range clientAlgos {
+		if _, ok := serverSet[a]; ok {
+			return a
+		}
+	}
+	// fallback: md5 for proto >= 30, md4 otherwise
+	return "md5"
+}
+
+// writeInt32LE writes a 32-bit little-endian integer to w.
+func writeInt32LE(w io.Writer, v int32) error {
+	var buf [4]byte
+	binary.LittleEndian.PutUint32(buf[:], uint32(v))
+	_, err := w.Write(buf[:])
+	return err
 }

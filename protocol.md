@@ -93,7 +93,7 @@ Each argument null-terminated, final extra `\x00` signals end.  First arg is alw
 ```
 Double newline terminates.  Special characters backslash-escaped via `safe_arg()` encoding.
 
-For protocol ≥ 30, the client can include a `-e` argument with feature flags in the format `e<version_sub><flags>`.  The server extracts this as `client_info` and checks individual characters (e.g., `strchr(client_info, 'v')`) to enable features.  See the compat flags table below.
+For protocol ≥ 30, the client embeds feature flags in the combined short-options argument.  The `e` character appears within the combined flags string (e.g., `-vle.ifxCIvu`), and everything after the `e` is the `client_info` string.  The server finds the `e` character in the argument and extracts the substring after it.  The format is `e<version_sub><flags>` where each character is a feature letter (`i`, `L`, `s`, `f`, `x`, `C`, `I`, `v`, `u`).  The server checks `strchr(client_info, '<letter>')` to enable features.  See the compat flags table below.
 
 ## Phase 4: Data Transfer (binary multiplexed I/O)
 
@@ -127,6 +127,29 @@ When `v` (CF_VARINT_FLIST_FLAGS) is negotiated, xmit flags in the file list use 
 **Server-side flag resolution:** The server builds `compat_flags` based on its compile-time capabilities (e.g., `CF_SYMLINK_TIMES` if `CAN_SET_SYMLINK_TIMES` is defined) AND the client's advertised feature flags.  The client sends feature flags via the `-e` argument (Phase 3) in the format `e<version_sub><flags>`, where each character is a feature letter (`i`, `L`, `s`, `f`, `x`, `C`, `I`, `v`, `u`).  The server checks `strchr(client_info, '<letter>')` to decide whether to set each client-requested flag.
 
 **Client-side:** The client reads the compat flags as a `varint` and extracts individual flags using bitwise AND.  When `CF_VARINT_FLIST_FLAGS` is set, `xfer_flags_as_varint` is enabled.
+
+### Checksum Negotiation (when `CF_VARINT_FLIST_FLAGS` is set)
+
+When `CF_VARINT_FLIST_FLAGS` is negotiated (via the `v` compat flag), both sides exchange their supported checksum algorithm lists as **vstrings** (variable-length strings).  This happens immediately after the compat flags exchange, before the mux layer starts.
+
+A **vstring** is encoded as: `length : uint8` followed by `data : raw[length]`.  If the length byte has the high bit set (`len & 0x80`), the actual length is `(len & 0x7F) * 256 + next_byte`.
+
+The exchange order is:
+1. **Server → Client:** checksum list vstring (e.g., `"md5\0md4\0"` with null-separated names)
+2. **Server → Client:** compression list vstring (only if compression is enabled; otherwise skipped)
+3. **Client → Server:** checksum list vstring
+4. **Client → Server:** compression list vstring (only if server sent one; otherwise skipped)
+
+The null-separated names use `\0` as the delimiter within the vstring.  Each side picks the first algorithm in the **client's list** that also appears in the server's list (client preference wins).
+
+### Checksum Seed Exchange
+
+After the checksum negotiation strings, the server sends a random checksum seed:
+
+1. **Server → Client:** `write_int(checksum_seed)` -- 4 bytes little-endian int32
+2. **Client → Server:** reads the seed as `read_int(f_in)`
+
+The seed is typically generated as `time(NULL) ^ (getpid() << 6)` on the server.  It is used to seed the block checksum algorithm (sum2) for the delta transfer.
 
 ## Multiplexed I/O Layer
 

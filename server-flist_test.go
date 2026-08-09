@@ -72,9 +72,10 @@ func TestSendFileList_SingleFile(t *testing.T) {
 	t.Logf("payload: %v", payload)
 
 	// verify structural properties
-	// 1. starts with root entry xflags (0x18 = sameUID | sameGID)
-	if payload[0] != 0x18 {
-		t.Errorf("first byte (root xflags) = 0x%02x, want 0x18", payload[0])
+	// 1. starts with root entry xflags (0x01 = XMIT_TOP_DIR)
+	// single byte because no extended flags needed
+	if payload[0] != 0x01 {
+		t.Errorf("first byte (root xflags) = 0x%02x, want 0x01", payload[0])
 	}
 
 	// 2. root name suffix length = 1 (for ".")

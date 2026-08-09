@@ -385,9 +385,9 @@ func TestIntegration_MultipleConnections(t *testing.T) {
 // This is a more realistic test than net.Pipe since it uses actual TCP sockets.
 func TestIntegration_ClientSelfTest(t *testing.T) {
 	testFS := fstest.MapFS{
-		"hello.txt":      {Data: []byte("hello via TCP")},
+		"hello.txt":       {Data: []byte("hello via TCP")},
 		"nested/deep.txt": {Data: []byte("nested content")},
-		"empty.txt":      {Data: []byte{}},
+		"empty.txt":       {Data: []byte{}},
 	}
 
 	srv, err := NewServer(&ServerModule{Name: "testmod", FS: testFS})
@@ -428,9 +428,9 @@ func TestIntegration_ClientSelfTest(t *testing.T) {
 
 	// verify files
 	for path, wantContent := range map[string]string{
-		"hello.txt":      "hello via TCP",
+		"hello.txt":       "hello via TCP",
 		"nested/deep.txt": "nested content",
-		"empty.txt":      "",
+		"empty.txt":       "",
 	} {
 		t.Run(path, func(t *testing.T) {
 			f, err := session.Open(path)
@@ -457,7 +457,9 @@ func TestIntegration_ClientSelfTest(t *testing.T) {
 		}
 		defer df.Close()
 
-		dirFile, ok := df.(interface{ ReadDir(n int) ([]fs.DirEntry, error) })
+		dirFile, ok := df.(interface {
+			ReadDir(n int) ([]fs.DirEntry, error)
+		})
 		if !ok {
 			t.Fatal("root does not support ReadDir")
 		}

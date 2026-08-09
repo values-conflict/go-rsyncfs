@@ -58,8 +58,8 @@ func sendFileList(w *mux.Writer, rootFS fs.FS, basePath string, version int, var
 		lastName  string
 	)
 
-	for _, entry := range entries {
-		xflags := computeXflags(entry, lastMode, lastUID, lastGID, lastMtime, lastName)
+	for i, entry := range entries {
+		xflags := computeXflags(entry, i == 0, lastMode, lastUID, lastGID, lastMtime, lastName)
 
 		if err := writeXflags(buf, xflags, entry.mode, version, varintFlistFlags); err != nil {
 			return fmt.Errorf("write xflags for %s: %w", entry.name, err)
@@ -202,7 +202,8 @@ func walkFS(rootFS fs.FS, basePath string) ([]fileEntry, error) {
 }
 
 // computeXflags calculates the delta-encoding xmit flags for a file entry.
-func computeXflags(entry fileEntry, lastMode fs.FileMode, lastUID, lastGID int32, lastMtime int64, lastName string) int {
+// isFirst controls whether this is the first entry (uid/gid must always be sent).
+func computeXflags(entry fileEntry, isFirst bool, lastMode fs.FileMode, lastUID, lastGID int32, lastMtime int64, lastName string) int {
 	xflags := 0
 
 	if entry.mode == lastMode {
@@ -211,9 +212,14 @@ func computeXflags(entry fileEntry, lastMode fs.FileMode, lastUID, lastGID int32
 	if lastMtime == entry.modTime.Unix() {
 		xflags |= xmitSameTime
 	}
-	// uid/gid default to 0, same as last after first entry
-	if lastUID == 0 && lastGID == 0 {
-		xflags |= xmitSameUID | xmitSameGID
+	// uid/gid: always sent for first entry, delta-encoded thereafter
+	if !isFirst {
+		if lastUID == 0 {
+			xflags |= xmitSameUID
+		}
+		if lastGID == 0 {
+			xflags |= xmitSameGID
+		}
 	}
 
 	// name prefix matching
@@ -224,6 +230,13 @@ func computeXflags(entry fileEntry, lastMode fs.FileMode, lastUID, lastGID int32
 	}
 	if l2 > 255 {
 		xflags |= xmitLongName
+	}
+
+	// avoid zero xflags (signals end-of-list)
+	// for directories, XMIT_TOP_DIR is appropriate
+	// for files, XMIT_TOP_DIR is harmless (upstream does this too)
+	if xflags == 0 {
+		xflags |= xmitTopDir
 	}
 
 	return xflags
