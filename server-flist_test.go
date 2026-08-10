@@ -11,16 +11,13 @@ import (
 	"github.com/values-conflict/go-rsyncfs/protocol/mux"
 )
 
-// readFlistPayload reads the MSG_DATA payload from a mux-encoded buffer.
+// readFlistPayload reads the transparent payload from a mux-encoded buffer.
 func readFlistPayload(t *testing.T, data []byte) []byte {
 	t.Helper()
 	r := mux.NewReader(bytes.NewReader(data))
-	code, payload, err := r.ReadMsg()
+	payload, err := r.ReadDataChunk()
 	if err != nil {
-		t.Fatalf("read msg: %v", err)
-	}
-	if code != mux.MsgData {
-		t.Fatalf("expected MsgData, got code %d", code)
+		t.Fatalf("read: %v", err)
 	}
 	return payload
 }
@@ -35,6 +32,9 @@ func TestSendFileList_EmptyDir(t *testing.T) {
 	err := sendFileList(w, srv.modules["test"].FS, ".", 30, false)
 	if err != nil {
 		t.Fatalf("sendFileList failed: %v", err)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
 	}
 
 	payload := readFlistPayload(t, buf.Bytes())
@@ -66,6 +66,9 @@ func TestSendFileList_SingleFile(t *testing.T) {
 	err := sendFileList(w, srv.modules["test"].FS, ".", 30, false)
 	if err != nil {
 		t.Fatalf("sendFileList failed: %v", err)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
 	}
 
 	payload := readFlistPayload(t, buf.Bytes())
@@ -127,6 +130,9 @@ func TestSendFileList_DeltaEncoding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sendFileList failed: %v", err)
 	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 
 	payload := readFlistPayload(t, buf.Bytes())
 	t.Logf("payload: %v", payload)
@@ -157,6 +163,9 @@ func TestSendFileList_NamePrefixReuse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sendFileList failed: %v", err)
 	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 
 	payload := readFlistPayload(t, buf.Bytes())
 	t.Logf("payload: %v", payload)
@@ -178,6 +187,9 @@ func TestSendFileList_Directory(t *testing.T) {
 	err := sendFileList(w, srv.modules["test"].FS, ".", 30, false)
 	if err != nil {
 		t.Fatalf("sendFileList failed: %v", err)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
 	}
 
 	payload := readFlistPayload(t, buf.Bytes())
@@ -207,6 +219,9 @@ func TestSendFileList_ProtocolVersions(t *testing.T) {
 			if err != nil {
 				t.Fatalf("sendFileList(version=%d) failed: %v", version, err)
 			}
+			if err := w.Flush(); err != nil {
+				t.Fatalf("flush: %v", err)
+			}
 			payload := readFlistPayload(t, buf.Bytes())
 			t.Logf("version %d payload: %v", version, payload)
 		})
@@ -225,6 +240,9 @@ func TestSendFileList_VarintFlistFlags(t *testing.T) {
 	err := sendFileList(w, srv.modules["test"].FS, ".", 32, true)
 	if err != nil {
 		t.Fatalf("sendFileList(varintFlistFlags=true) failed: %v", err)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
 	}
 
 	payload := readFlistPayload(t, buf.Bytes())

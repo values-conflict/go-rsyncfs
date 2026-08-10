@@ -13,3 +13,5 @@ There is a rough summary of the upstream protocol in `protocol.md`, focused on d
 `protocol.md` should always read as a current, up-to-date reference for the upstream protocol -- no implementation status notes, no "current scope", no "TODO" callouts.  It describes the protocol, not our progress.
 
 `plan.md` should always read as a current, up-to-date plan -- written as if the plan had always been this way.  The only indicator of progress is crossed-off task/phase titles.  Avoid language like "Implementation note", "changed from plan", "replaced by", "added", "rearchitecture", "Current status", or "Currently" that reads as a retroactive correction.
+
+For now, we don't care about backwards compatibility for consumers of our API/library -- if an API, description, documentation, etc needs to change, it should just change.

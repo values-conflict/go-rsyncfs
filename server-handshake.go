@@ -63,6 +63,9 @@ func (s *Server) HandleConnection(rw io.ReadWriter, opts HandleOptions) error {
 	if err := sendFileList(mw, result.Module.FS, ".", result.Version, result.VarintFlistFlags); err != nil {
 		return fmt.Errorf("send file list: %w", err)
 	}
+	if err := mw.Flush(); err != nil {
+		return fmt.Errorf("flush file list: %w", err)
+	}
 
 	entries, err := walkFS(result.Module.FS, ".")
 	if err != nil {
@@ -91,12 +94,13 @@ func (s *Server) HandleConnection(rw io.ReadWriter, opts HandleOptions) error {
 			// NDX_DONE: phase transition or end of transfer
 			phase++
 			if phase > maxPhase {
-				// Clear any leftover buffer bytes from the phase exchange so that the first file selector reads from a fresh frame.
-				mr.ClearBuf()
 				break
 			}
-			if err := mw.WriteMsg(mux.MsgData, []byte{0}); err != nil {
+			if _, err := mw.Write([]byte{0}); err != nil {
 				return fmt.Errorf("write ndx done: %w", err)
+			}
+			if err := mw.Flush(); err != nil {
+				return fmt.Errorf("flush ndx done: %w", err)
 			}
 			continue
 		}
@@ -130,8 +134,11 @@ func (s *Server) HandleConnection(rw io.ReadWriter, opts HandleOptions) error {
 	// Server writes NDX_DONE to signal end of transfer, then reads the
 	// client's final NDX_DONE. For proto >= 31, there's an extra
 	// NDX_DONE round-trip (matching read_final_goodbye in upstream).
-	if err := mw.WriteMsg(mux.MsgData, []byte{0}); err != nil {
+	if _, err := mw.Write([]byte{0}); err != nil {
 		return nil // connection already closed, don't treat as error
+	}
+	if err := mw.Flush(); err != nil {
+		return nil
 	}
 
 	if result.Version >= 29 {
@@ -141,7 +148,10 @@ func (s *Server) HandleConnection(rw io.ReadWriter, opts HandleOptions) error {
 		}
 		if result.Version >= 31 {
 			// Extra NDX_DONE round-trip for proto >= 31
-			if err := mw.WriteMsg(mux.MsgData, []byte{0}); err != nil {
+			if _, err := mw.Write([]byte{0}); err != nil {
+				return nil
+			}
+			if err := mw.Flush(); err != nil {
 				return nil
 			}
 			_, err = ndx.readSelector(mr, result.Version)

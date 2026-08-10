@@ -264,12 +264,11 @@ func (s *Session) readFileList() ([]fileListEntry, error) {
 		return s.fileList, nil
 	}
 
-	code, payload, err := s.muxReader.ReadMsg()
+	// Read the file list from the transparent mux stream.
+	// The file list is sent as a single chunk (wrapped in MSG_DATA frames).
+	payload, err := s.muxReader.ReadDataChunk()
 	if err != nil {
-		return nil, fmt.Errorf("read file list msg: %w", err)
-	}
-	if code != mux.MsgData {
-		return nil, fmt.Errorf("expected MSG_DATA for file list, got code %d", code)
+		return nil, fmt.Errorf("read file list: %w", err)
 	}
 
 	flr := newFlistReader(payload, s.version, s.varintFlistFlags)
@@ -354,16 +353,33 @@ func (s *Session) phaseExchange() error {
 
 	for phase := 0; phase < maxPhase; phase++ {
 		// Send NDX_DONE to server
-		if err := s.muxWriter.WriteMsg(mux.MsgData, []byte{0}); err != nil {
+		if _, err := s.muxWriter.Write([]byte{0}); err != nil {
 			return fmt.Errorf("write phase ndx done: %w", err)
 		}
-		// Read server's NDX_DONE response
-		code, _, err := s.muxReader.ReadMsg()
-		if err != nil {
+		if err := s.muxWriter.Flush(); err != nil {
+			return fmt.Errorf("flush phase ndx done: %w", err)
+		}
+		// Read server's NDX_DONE response from transparent stream
+		var ndxBuf [5]byte // max compressed NDX size
+		if _, err := io.ReadFull(s.muxReader, ndxBuf[:1]); err != nil {
 			return fmt.Errorf("read phase ndx done: %w", err)
 		}
-		if code != mux.MsgData {
-			return fmt.Errorf("expected MSG_DATA for phase exchange, got code %d", code)
+		// If not NDX_DONE (0x00), read more bytes for compressed form
+		if ndxBuf[0] != 0 && ndxBuf[0] != 0xFF {
+			if ndxBuf[0] == 0xFE {
+				if _, err := io.ReadFull(s.muxReader, ndxBuf[1:3]); err != nil {
+					return fmt.Errorf("read phase ndx done: %w", err)
+				}
+				if ndxBuf[1]&0x80 != 0 {
+					if _, err := io.ReadFull(s.muxReader, ndxBuf[3:4]); err != nil {
+						return fmt.Errorf("read phase ndx done: %w", err)
+					}
+				}
+			}
+		} else if ndxBuf[0] == 0xFF {
+			if _, err := io.ReadFull(s.muxReader, ndxBuf[1:2]); err != nil {
+				return fmt.Errorf("read phase ndx done: %w", err)
+			}
 		}
 	}
 
@@ -385,7 +401,11 @@ func (s *Session) writeSelector(ndx int, iflags int) error {
 		buf.WriteByte(byte(iflags >> 8))
 	}
 
-	return s.muxWriter.WriteMsg(mux.MsgData, buf.Bytes())
+	_, err := s.muxWriter.Write(buf.Bytes())
+	if err != nil {
+		return fmt.Errorf("write selector: %w", err)
+	}
+	return s.muxWriter.Flush()
 }
 
 // item flags for selector (matching upstream rsync.h ITEM_* defines)
@@ -455,29 +475,29 @@ func (s *Session) openFile(target *fileListEntry, allEntries []fileListEntry) (*
 		return nil, fmt.Errorf("write selector: %w", err)
 	}
 
-	// server responds with sum_head as MSG_DATA
-	code, payload, err := s.muxReader.ReadMsg()
-	if err != nil {
+	// server responds with sum_head (12 or 16 bytes from transparent stream)
+	var sumHeadBuf [16]byte
+	if _, err := io.ReadFull(s.muxReader, sumHeadBuf[:12]); err != nil {
 		return nil, fmt.Errorf("read sum head: %w", err)
 	}
-	if code != mux.MsgData {
-		return nil, fmt.Errorf("expected MSG_DATA for sum head, got code %d", code)
+	if s.version >= 27 {
+		if _, err := io.ReadFull(s.muxReader, sumHeadBuf[12:16]); err != nil {
+			return nil, fmt.Errorf("read sum head: %w", err)
+		}
 	}
 
 	// parse sum_head
-	sh, err := parseSumHead(payload, s.version)
+	sh, err := parseSumHead(sumHeadBuf[:], s.version)
 	if err != nil {
 		return nil, fmt.Errorf("parse sum head: %w", err)
 	}
 
 	// read block checksums if count > 0
 	if sh.count > 0 {
-		code, _, err = s.muxReader.ReadMsg()
-		if err != nil {
+		cksumSize := int(sh.count) * (4 + int(sh.s2length))
+		cksumBuf := make([]byte, cksumSize)
+		if _, err := io.ReadFull(s.muxReader, cksumBuf); err != nil {
 			return nil, fmt.Errorf("read block checksums: %w", err)
-		}
-		if code != mux.MsgData {
-			return nil, fmt.Errorf("expected MSG_DATA for checksums, got code %d", code)
 		}
 	}
 
@@ -495,36 +515,45 @@ func (s *Session) openFile(target *fileListEntry, allEntries []fileListEntry) (*
 	// end of stream marker
 	deltaBuf.Write([]byte{0, 0, 0, 0})
 
-	if err := s.muxWriter.WriteMsg(mux.MsgData, deltaBuf.Bytes()); err != nil {
+	if _, err := s.muxWriter.Write(deltaBuf.Bytes()); err != nil {
 		return nil, fmt.Errorf("send delta stream: %w", err)
 	}
+	if err := s.muxWriter.Flush(); err != nil {
+		return nil, fmt.Errorf("flush delta stream: %w", err)
+	}
 
-	// server sends file data as MSG_DATA
-	code, payload, err = s.muxReader.ReadMsg()
-	if err != nil {
+	// server sends file data
+	// Compute file size from sum_head:
+	// If remainder > 0: (count-1)*blength + remainder
+	// If remainder == 0: count*blength (last block is full)
+	var fileSize int64
+	if sh.count > 0 {
+		if sh.remainder > 0 {
+			fileSize = int64(sh.count-1)*int64(sh.blength) + int64(sh.remainder)
+		} else {
+			fileSize = int64(sh.count) * int64(sh.blength)
+		}
+	}
+	fileData := make([]byte, fileSize)
+	if _, err := io.ReadFull(s.muxReader, fileData); err != nil {
 		return nil, fmt.Errorf("read file data: %w", err)
 	}
-	if code != mux.MsgData {
-		return nil, fmt.Errorf("expected MSG_DATA for file data, got code %d", code)
-	}
 
-	// server sends file checksum for verification
-	code, _, err = s.muxReader.ReadMsg()
-	if err != nil {
+	// server sends file checksum for verification (skip it)
+	cksumLen := int(sh.s2length)
+	cksumBuf := make([]byte, cksumLen)
+	if _, err := io.ReadFull(s.muxReader, cksumBuf); err != nil {
 		return nil, fmt.Errorf("read file checksum: %w", err)
-	}
-	if code != mux.MsgData {
-		return nil, fmt.Errorf("expected MSG_DATA for file checksum, got code %d", code)
 	}
 
 	// send MSG_SUCCESS with file index
 	var ndxBuf [4]byte
 	binary.LittleEndian.PutUint32(ndxBuf[:], uint32(target.index))
-	if err := s.muxWriter.WriteMsg(mux.MsgSuccess, ndxBuf[:]); err != nil {
+	if err := s.muxWriter.SendMsg(mux.MsgSuccess, ndxBuf[:]); err != nil {
 		return nil, fmt.Errorf("send MSG_SUCCESS: %w", err)
 	}
 
-	return newModuleFile(*target, payload), nil
+	return newModuleFile(*target, fileData), nil
 }
 
 // parseSumHead parses the sum header from raw bytes.

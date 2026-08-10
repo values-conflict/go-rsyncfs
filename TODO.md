@@ -13,23 +13,11 @@
     - added streaming reads from batched mux frames (upstream batches multiple writes into single frame)
     - added final goodbye protocol (read_final_goodbye) for proto >= 24/31
     - server handles directory selectors (skips non-ITEM_TRANSFER and directories)
-  - current state (2025-08-09 investigation):
-    - handshake through file list works, phase exchange works
-    - client sends selectors (confirmed via hex trace)
-    - file transfer fails: server reads wrong Generator sum_head due to mux frame batching
-  - root cause analysis:
-    - upstream rsync uses a multi-process architecture (Receiver + Generator connected via pipes)
-    - the Generator writes selectors AND sum_heads to the socket (via iobuf mux layer)
-    - the iobuf layer batches multiple writes into single mux frames
-    - when batching occurs, a selector for file N may be batched with sum_head for file N+1
-    - our server reads the batched frame, parses the selector, then reads the "leftover" bytes as the Generator's sum_head
-    - but those leftover bytes are the sum_head for a DIFFERENT file, causing protocol desync
-    - additionally, some selectors arrive without ITEM_TRANSFER flag (e.g., iflags=0x0018 for report-only)
-    - the server correctly skips non-TRANSFER selectors but then blocks waiting for more selectors that never arrive
-  - remaining issues (for full upstream interop):
-    - must handle Generator sum_head reading correctly when selector + sum_head are batched in one mux frame
-    - the Generator's sum_head must be read from a SEPARATE mux frame, not from leftover selector bytes
-    - need to understand upstream's iobuf batching boundaries to know when selector ends and sum_head begins
+    - replaced explicit-frame mux API with transparent buffered I/O matching upstream's iobuf model
+    - fixed 4-byte compressed NDX form reading (was reading 4 bytes instead of 5, corrupting iflags)
+    - fixed file size calculation for files where remainder == 0 (exactly N blocks)
+    - fixed NDX_DONE handling (no iflags follow NDX_DONE, unlike regular selectors)
+  - remaining:
     - checksum2 (block checksums) must include the seed: MD5(seed + data) when CF_CHKSUM_SEED_FIX is set
     - final file checksum must NOT include the seed (plain MD5(data))
     - may need to match upstream's exact wire format for file list entries (mode, uid, gid encoding)
@@ -43,3 +31,7 @@
 - create explicit `Example` functions that demonstrate how to create a TCP-based rsync `Server` and/or `Client`
 
 - can we somehow get creative with the `net.Pipe` usage / tests to avoid the goroutines entirely?
+
+- rewrite `plan.md` as if the transparent buffering `mux` reader/writer was the plan all along (Task 13 shouldn't exist, or shouldn't happen so late)
+
+- our `protocol/mux` implementation doesn't actually bound the size of the buffer (and flush when it's full) - it will fill up forever, which may or may not cause issues at some point?  maybe it's fine but I don't think so - I think we need to probably flush more often so that the remote end knows what our progress is (and because TCP packets are not unbounded in size and our files might get big enough to trigger something like `bytes.ErrTooLarge` on our `bytes.Buffer`)

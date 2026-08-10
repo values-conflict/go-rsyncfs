@@ -161,6 +161,22 @@ header = ((MPLEX_BASE + msgCode) << 24) | length
 where MPLEX_BASE = 7, length in bits [0..23] (max ~16MB per frame)
 ```
 
+### `iobuf` Buffering Model
+
+Upstream uses **two separate output paths** with circular buffers (32KB default, `IO_BUFFER_SIZE` in `rsync.h`):
+
+1. **`iobuf.out`** -- for `MSG_DATA` (normal protocol data: selectors, sum_heads, delta streams, file data).  Application code calls `write_buf()`/`write_int()`/`write_byte()` which accumulate raw bytes in the circular buffer.  When the buffer is flushed (full, or before sending a non-DATA message), the accumulated bytes are wrapped in a `MSG_DATA` frame header and written to the socket.  **Multiple small writes are batched into larger frames.**
+
+2. **`iobuf.msg`** -- for non-DATA messages (`MSG_SUCCESS`, `MSG_ERROR`, etc.).  Application code calls `send_msg()` which buffers the message with its own header.  When the message buffer is flushed, **any pending `iobuf.out` data is flushed first** (ensuring `MSG_DATA` frames precede control messages), then the message frames are sent.
+
+**Input side:**
+
+1. **`iobuf.in`** -- transparent byte stream from incoming `MSG_DATA` frames.  Application code calls `read_buf()`/`read_int()`/`read_byte()` which read from this buffer.  When the buffer drains, the iobuf layer reads the next `MSG_DATA` frame from the socket and refills it.  **The application never sees mux headers.**
+
+2. **Message reading** -- non-DATA frames are read separately via the mux dispatch loop in `perform_io()`.
+
+**Key implication for interop:** Because `iobuf.out` batches multiple writes, a single `MSG_DATA` frame on the wire may contain multiple protocol messages (e.g., a selector followed immediately by a sum_head).  The reader must present a transparent byte stream so the application can read each message independently, regardless of frame boundaries.
+
 ### Message Codes (`enum msgcode`)
 
 | Code | Name | Description | Payload Size | Direction |
@@ -295,9 +311,9 @@ Stateful delta encoding that tracks previous positive and negative indices indep
 For cases 2 and 3, encode the diff:
 - `1 <= diff <= 253`: single byte = diff
 - `diff == 0` or `254 <= diff <= 32767`: `0xFE` + 2-byte big-endian diff
-- `diff < 0` or `diff > 32767`: `0xFE` + 4 bytes encoding the **absolute index** (not the diff): `(absNdx >> 24) | 0x80`, `absNdx & 0xFF`, `(absNdx >> 8) & 0xFF`, `(absNdx >> 16) & 0xFF`
+- `diff < 0` or `diff > 32767`: `0xFE` + 4 bytes encoding the **absolute index** (not the diff), wire order: `(absNdx >> 24) | 0x80`, `absNdx & 0xFF`, `(absNdx >> 8) & 0xFF`, `(absNdx >> 16) & 0xFF`
 
-**Important:** The 4-byte form encodes the absolute index value, NOT the diff. The reader must NOT add it to the previous tracker value. The 1-byte and 2-byte forms encode diffs and ARE added to the tracker.
+**Important:** The 4-byte form encodes the absolute index value, NOT the diff. The reader must NOT add it to the previous tracker value. The 1-byte and 2-byte forms encode diffs and ARE added to the tracker.  The 4-byte form is 5 bytes total on the wire (0xFE prefix + 4 data bytes).
 
 **Reading (`read_ndx`):**
 
@@ -306,7 +322,7 @@ For cases 2 and 3, encode the diff:
    - `0xFF` → read next byte into `b[0]`, use `prev_negative` as tracking variable, result will be negated
    - `0x01-0xFD` → `result = byte_value + prev_positive`, update `prev_positive` (1-byte diff form)
    - `0xFE` → read next byte into `b[0]`:
-     - High bit set (`b[0] & 0x80`): read 2 more bytes into `b[1..2]`, reconstruct as `b[3]=(b[0]&0x7F), b[0]=b[1], b[1]=b[2]`, then `num = IVAL(b, 0)` (LE int32). **This is the absolute index, NOT a diff.** Update tracker to this value.
+     - High bit set (`b[0] & 0x80`): read 3 more bytes into `b[1..3]`, reconstruct as LE int32 with high byte from `(b[0]&0x7F)`.  **This is the absolute index, NOT a diff.**  Update tracker to this value.  Wire format: `[0xFE, (abs>>24)|0x80, abs&0xFF, (abs>>8)&0xFF, (abs>>16)&0xFF]`
      - High bit clear: read 1 more byte into `b[1]`, `num = (b[0]<<8 | b[1]) + *prev_ptr` (2-byte diff form)
 
 For `0xFF` path, negate the final result before returning.

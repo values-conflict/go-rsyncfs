@@ -1,196 +1,211 @@
-package mux_test
+package mux
 
 import (
 	"bytes"
-	"encoding/binary"
 	"io"
 	"testing"
-
-	"github.com/values-conflict/go-rsyncfs/protocol/mux"
 )
 
-func TestRoundTrip(t *testing.T) {
-	tests := []struct {
-		name    string
-		code    uint8
-		payload []byte
-	}{
-		{"data-empty", mux.MsgData, nil},
-		{"data-hello", mux.MsgData, []byte("hello world")},
-		{"error-xfer", mux.MsgErrorXfer, []byte("transfer failed")},
-		{"info", mux.MsgInfo, []byte("some info message")},
-		{"success-zero-ndx", mux.MsgSuccess, makeLE32(0)},
-		{"redo", mux.MsgRedo, makeLE32(42)},
-		{"noop-empty", mux.MsgNoop, nil},
-		{"deleted", mux.MsgDeleted, []byte("/path/to/file")},
+func TestWriter_Batching(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+
+	// Multiple small writes
+	w.Write([]byte("a"))
+	w.Write([]byte("b"))
+	w.Write([]byte("c"))
+
+	// Flush -- should produce a SINGLE MSG_DATA frame
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			pr, pw := io.Pipe()
-			defer pr.Close()
-			defer pw.Close()
+	// Verify: 4-byte header + 3-byte payload
+	if buf.Len() != 7 {
+		t.Errorf("expected 7 bytes (4 header + 3 payload), got %d", buf.Len())
+	}
 
-			w := mux.NewWriter(pw)
-			var errCh chan error = make(chan error, 1)
-			go func() {
-				errCh <- w.WriteMsg(tt.code, tt.payload)
-			}()
-
-			r := mux.NewReader(pr)
-			gotCode, gotPayload, err := r.ReadMsg()
-			if err != nil {
-				t.Fatalf("ReadMsg: %v", err)
-			}
-			writeErr := <-errCh
-			if writeErr != nil {
-				t.Fatalf("WriteMsg: %v", writeErr)
-			}
-
-			if gotCode != tt.code {
-				t.Errorf("code = %d, want %d", gotCode, tt.code)
-			}
-			if !bytes.Equal(gotPayload, tt.payload) {
-				t.Errorf("payload = %q, want %q", gotPayload, tt.payload)
-			}
-		})
+	// Parse the frame
+	r := NewReader(&buf)
+	got := make([]byte, 3)
+	if _, err := io.ReadFull(r, got); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if string(got) != "abc" {
+		t.Errorf("got %q, want %q", got, "abc")
 	}
 }
 
-func TestHeaderEncoding(t *testing.T) {
+func TestWriter_SendMsgFlushesFirst(t *testing.T) {
 	var buf bytes.Buffer
-	w := mux.NewWriter(&buf)
-	if err := w.WriteMsg(mux.MsgData, []byte("test")); err != nil {
-		t.Fatal(err)
+	w := NewWriter(&buf)
+
+	// Write data (not flushed yet)
+	w.Write([]byte("data"))
+
+	// SendMsg should flush data first, then send the message
+	if err := w.SendMsg(MsgSuccess, []byte{1, 2, 3, 4}); err != nil {
+		t.Fatalf("SendMsg: %v", err)
 	}
 
-	got := buf.Bytes()
-	if len(got) != 8 { // 4-byte header + 4 bytes payload
-		t.Fatalf("frame length = %d, want 8", len(got))
+	// Should have two frames: MSG_DATA + MSG_SUCCESS
+	r := NewReader(&buf)
+
+	// Read the data
+	data := make([]byte, 4)
+	if _, err := io.ReadFull(r, data); err != nil {
+		t.Fatalf("Read data: %v", err)
+	}
+	if string(data) != "data" {
+		t.Errorf("data: got %q, want %q", data, "data")
 	}
 
-	val := binary.LittleEndian.Uint32(got[:4])
-	msgCode := val >> 24                 // should be MPLEX_BASE(7) + MSG_DATA(0) = 7
-	payloadLen := uint32(val & 0xFFFFFF) // should be 4
-
-	if msgCode != 7 {
-		t.Errorf("header high byte = %d, want 7 (MPLEX_BASE + MsgData)", msgCode)
-	}
-	if payloadLen != 4 {
-		t.Errorf("payload length in header = %d, want 4", payloadLen)
-	}
-
-	gotPayload := got[4:]
-	if string(gotPayload) != "test" {
-		t.Errorf("payload = %q, want \"test\"", gotPayload)
-	}
-}
-
-func TestZeroLengthPayload(t *testing.T) {
-	var buf bytes.Buffer
-	w := mux.NewWriter(&buf)
-	if err := w.WriteMsg(mux.MsgNoop, nil); err != nil {
-		t.Fatal(err)
-	}
-
-	got := buf.Bytes()
-	if len(got) != 4 { // header only, no payload
-		t.Fatalf("frame length = %d, want 4", len(got))
-	}
-
-	val := binary.LittleEndian.Uint32(got[:4])
-	msgCode := val >> 24 // MPLEX_BASE(7) + MSG_NOOP(42) = 49
-	payloadLen := uint32(val & 0xFFFFFF)
-
-	if msgCode != 49 {
-		t.Errorf("header high byte = %d, want 49 (MPLEX_BASE + MsgNoop)", msgCode)
-	}
-	if payloadLen != 0 {
-		t.Errorf("payload length in header = %d, want 0", payloadLen)
-	}
-
-	r := mux.NewReader(bytes.NewReader(got))
-	code, payload, err := r.ReadMsg()
+	// Read the message
+	code, payload, err := r.RecvMsg()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("RecvMsg: %v", err)
 	}
-	if code != mux.MsgNoop {
-		t.Errorf("code = %d, want %d", code, mux.MsgNoop)
+	if code != MsgSuccess {
+		t.Errorf("code: got %d, want %d", code, MsgSuccess)
 	}
-	if len(payload) != 0 {
-		t.Errorf("payload length = %d, want 0", len(payload))
-	}
-}
-
-func TestTruncatedHeader(t *testing.T) {
-	r := mux.NewReader(bytes.NewReader([]byte{0x07})) // only 1 byte of header; need 4
-	code, payload, err := r.ReadMsg()
-	if err == nil {
-		t.Fatal("expected error for truncated header")
-	}
-	if code != 0 || len(payload) > 0 {
-		t.Errorf("unexpected return values: code=%d, payloadLen=%d", code, len(payload))
+	if !bytes.Equal(payload, []byte{1, 2, 3, 4}) {
+		t.Errorf("payload: got %v, want %v", payload, []byte{1, 2, 3, 4})
 	}
 }
 
-func TestTruncatedPayload(t *testing.T) {
-	// Write a frame header claiming 10 bytes of payload but only provide 3 actual bytes.
-	header := make([]byte, 4)
-	binary.LittleEndian.PutUint32(header, uint32(7)<<24|10) // MPLEX_BASE + MsgData = 7, len=10
-	data := append(header, 'a', 'b', 'c')                   // only 3 of promised 10 bytes
-
-	r := mux.NewReader(bytes.NewReader(data))
-	code, payload, err := r.ReadMsg()
-	if err == nil {
-		t.Fatal("expected error for truncated payload")
-	}
-	if code != 0 || len(payload) > 0 {
-		t.Errorf("unexpected return values: code=%d, payloadLen=%d", code, len(payload))
-	}
-}
-
-func TestPayloadTooLarge(t *testing.T) {
+func TestReader_SpansMultipleFrames(t *testing.T) {
 	var buf bytes.Buffer
-	w := mux.NewWriter(&buf)
-	big := make([]byte, 0xFFFFFF+1) // one byte over the limit
-	err := w.WriteMsg(mux.MsgData, big)
-	if err == nil {
-		t.Fatal("expected error for oversized payload")
+	w := NewWriter(&buf)
+
+	// Write and flush twice (two separate MSG_DATA frames)
+	w.Write([]byte("hello"))
+	w.Flush()
+	w.Write([]byte(" world"))
+	w.Flush()
+
+	// Read should span both frames transparently
+	r := NewReader(&buf)
+	got := make([]byte, 11)
+	if _, err := io.ReadFull(r, got); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if string(got) != "hello world" {
+		t.Errorf("got %q, want %q", got, "hello world")
 	}
 }
 
-func TestMultipleFrames(t *testing.T) {
+func TestReader_RecvMsgSkipsData(t *testing.T) {
 	var buf bytes.Buffer
-	w := mux.NewWriter(&buf)
-	for i := uint8(0); i < 3; i++ {
-		if err := w.WriteMsg(mux.MsgData, []byte{i}); err != nil {
-			t.Fatal(err)
-		}
-	}
+	w := NewWriter(&buf)
 
-	r := mux.NewReader(&buf)
-	for wantCode := uint8(0); wantCode < 3; wantCode++ {
-		code, payload, err := r.ReadMsg()
-		if err != nil {
-			t.Fatalf("frame %d: ReadMsg: %v", wantCode, err)
-		}
-		if code != mux.MsgData {
-			t.Errorf("frame %d: code = %d, want MsgData(%d)", wantCode, code, mux.MsgData)
-		}
-		if len(payload) != 1 || payload[0] != wantCode {
-			t.Errorf("frame %d: payload = %v, want [%d]", wantCode, payload, wantCode)
-		}
-	}
+	// Write data and a message
+	w.Write([]byte("skip this"))
+	w.Flush()
+	w.SendMsg(MsgSuccess, []byte{42})
 
-	// EOF after all frames consumed.
-	code, _, err := r.ReadMsg()
-	if err != io.EOF {
-		t.Fatalf("expected EOF after consuming all frames; got code=%d, err=%v", code, err)
+	r := NewReader(&buf)
+
+	// RecvMsg should skip the data and return the message
+	code, payload, err := r.RecvMsg()
+	if err != nil {
+		t.Fatalf("RecvMsg: %v", err)
+	}
+	if code != MsgSuccess {
+		t.Errorf("code: got %d, want %d", code, MsgSuccess)
+	}
+	if len(payload) != 1 || payload[0] != 42 {
+		t.Errorf("payload: got %v, want [42]", payload)
 	}
 }
 
-func makeLE32(v int32) []byte {
-	b := make([]byte, 4)
-	binary.LittleEndian.PutUint32(b, uint32(v))
-	return b
+func TestEmptyFlush(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+
+	// Flush with empty buffer should be a no-op
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("expected 0 bytes after empty Flush, got %d", buf.Len())
+	}
+}
+
+func TestLargeWrite(t *testing.T) {
+	// Write more than max frame size (0xFFFFFF)
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+
+	data := make([]byte, 0x1000000) // 16MB +
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+
+	w.Write(data)
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	// Should be split into multiple frames
+	r := NewReader(&buf)
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Errorf("large write round-trip failed: got %d bytes, want %d", len(got), len(data))
+	}
+}
+
+func TestBatchedSelectorAndSumHead(t *testing.T) {
+	// Simulate upstream batching: selector + sum_head in one MSG_DATA frame
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+
+	selector := []byte{0x01, 0x00, 0x80} // ndx=1, ITEM_TRANSFER
+	sumHead := make([]byte, 16)          // 4 int32s: count, blength, s2length, remainder
+
+	w.Write(selector)
+	w.Write(sumHead)
+	w.Flush() // batched into one MSG_DATA frame
+
+	// Reader should be able to read selector and sum_head independently
+	r := NewReader(&buf)
+
+	// Read selector
+	sel := make([]byte, 3)
+	if _, err := io.ReadFull(r, sel); err != nil {
+		t.Fatalf("Read selector: %v", err)
+	}
+	if !bytes.Equal(sel, selector) {
+		t.Errorf("selector: got %v, want %v", sel, selector)
+	}
+
+	// Read sum_head
+	sh := make([]byte, 16)
+	if _, err := io.ReadFull(r, sh); err != nil {
+		t.Fatalf("Read sum_head: %v", err)
+	}
+	if !bytes.Equal(sh, sumHead) {
+		t.Errorf("sum_head: got %v, want %v", sh, sumHead)
+	}
+}
+
+func TestEmptyDataframe(t *testing.T) {
+	// Empty MSG_DATA frame should be handled gracefully
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+
+	// Flush with no data -- should be a no-op (no frame written)
+	w.Flush()
+	if buf.Len() != 0 {
+		t.Errorf("expected 0 bytes for empty Flush, got %d", buf.Len())
+	}
+
+	// Write empty then flush -- still no frame
+	w.Write([]byte{})
+	w.Flush()
+	if buf.Len() != 0 {
+		t.Errorf("expected 0 bytes for empty Write+Flush, got %d", buf.Len())
+	}
 }

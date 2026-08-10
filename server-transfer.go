@@ -137,6 +137,11 @@ func sendFile(r *mux.Reader, w *mux.Writer, f fs.File, version int) error {
 		}
 	}
 
+	// Flush before reading the delta stream so the client can read sum_head + checksums
+	if err := w.Flush(); err != nil {
+		return fmt.Errorf("flush sum data: %w", err)
+	}
+
 	// --- step 3: read delta stream from client ---
 	// the delta stream tells us which blocks the client needs
 	// for a fresh pull (no local copy), the client sends token references for all blocks
@@ -145,8 +150,7 @@ func sendFile(r *mux.Reader, w *mux.Writer, f fs.File, version int) error {
 	}
 
 	// --- step 4: send file data ---
-	// send the full file data as MSG_DATA
-	if err := w.WriteMsg(mux.MsgData, data); err != nil {
+	if _, err := w.Write(data); err != nil {
 		return fmt.Errorf("send file data: %w", err)
 	}
 
@@ -155,8 +159,13 @@ func sendFile(r *mux.Reader, w *mux.Writer, f fs.File, version int) error {
 		return fmt.Errorf("send file checksum: %w", err)
 	}
 
+	// Flush all buffered data before reading the client's response
+	if err := w.Flush(); err != nil {
+		return fmt.Errorf("flush file data: %w", err)
+	}
+
 	// --- step 6: wait for MSG_SUCCESS ---
-	code, payload, err := r.ReadMsg()
+	code, payload, err := r.RecvMsg()
 	if err != nil {
 		return fmt.Errorf("read success msg: %w", err)
 	}
@@ -172,7 +181,8 @@ func sendFile(r *mux.Reader, w *mux.Writer, f fs.File, version int) error {
 	return nil
 }
 
-// writeSumHead writes the sum header as a MSG_DATA frame.
+// writeSumHead writes the sum header to the mux stream.
+// The data is buffered and will be sent as MSG_DATA on Flush().
 func writeSumHead(w *mux.Writer, sh sumHead, version int) error {
 	buf := make([]byte, 16) // 4 int32s
 	binary.LittleEndian.PutUint32(buf[0:4], uint32(sh.count))
@@ -180,11 +190,13 @@ func writeSumHead(w *mux.Writer, sh sumHead, version int) error {
 	if version >= 27 {
 		binary.LittleEndian.PutUint32(buf[8:12], uint32(sh.s2length))
 		binary.LittleEndian.PutUint32(buf[12:16], uint32(sh.remainder))
-		return w.WriteMsg(mux.MsgData, buf)
+		_, err := w.Write(buf)
+		return err
 	}
 	// proto < 27: no s2length field
 	binary.LittleEndian.PutUint32(buf[8:12], uint32(sh.remainder))
-	return w.WriteMsg(mux.MsgData, buf[:12])
+	_, err := w.Write(buf[:12])
+	return err
 }
 
 // sendBlockChecksums writes per-block checksums as a single MSG_DATA frame.
@@ -218,10 +230,11 @@ func sendBlockChecksums(w *mux.Writer, data []byte, sh sumHead) error {
 		offset = blockEnd
 	}
 
-	return w.WriteMsg(mux.MsgData, buf)
+	_, err := w.Write(buf)
+	return err
 }
 
-// readDeltaStream reads the delta stream from the client.
+// readDeltaStream reads the delta stream from the transparent mux stream.
 // The delta stream tells the server which blocks the client needs.
 // For a fresh pull (no local copy), the client sends token references for all blocks.
 //
@@ -230,15 +243,32 @@ func sendBlockChecksums(w *mux.Writer, data []byte, sh sumHead) error {
 //   - Token reference: int32(-(blockIndex+1)), means "I need block blockIndex"
 //   - End of stream: int32(0)
 func readDeltaStream(r *mux.Reader, sh sumHead) error {
-	code, payload, err := r.ReadMsg()
-	if err != nil {
-		return fmt.Errorf("read delta msg: %w", err)
+	// Read the delta stream incrementally, parsing as we go.
+	// Stop when we hit the end marker (int32(0)).
+	for {
+		var buf [4]byte
+		if _, err := io.ReadFull(r, buf[:]); err != nil {
+			return fmt.Errorf("read delta command: %w", err)
+		}
+		cmd := int32(binary.LittleEndian.Uint32(buf[:]))
+		if cmd == 0 {
+			break // end of stream
+		}
+		if cmd > 0 {
+			// Literal data: skip cmd bytes
+			literal := make([]byte, cmd)
+			if _, err := io.ReadFull(r, literal); err != nil {
+				return fmt.Errorf("read literal data: %w", err)
+			}
+		} else {
+			// Token reference: validate block index
+			blockIdx := -cmd - 1
+			if blockIdx < 0 || blockIdx >= sh.count {
+				return fmt.Errorf("invalid block index %d (count=%d)", blockIdx, sh.count)
+			}
+		}
 	}
-	if code != mux.MsgData {
-		return fmt.Errorf("expected MSG_DATA for delta, got code %d", code)
-	}
-
-	return parseDeltaStream(payload, sh)
+	return nil
 }
 
 // parseDeltaStream parses the raw delta stream bytes and validates the tokens.
@@ -278,9 +308,11 @@ func parseDeltaStream(data []byte, sh sumHead) error {
 }
 
 // sendFileChecksum computes and sends the final file checksum for verification.
+// The checksum is buffered and sent as MSG_DATA on Flush().
 func sendFileChecksum(w *mux.Writer, data []byte, s2length int) error {
 	cksum := checksum2(data, s2length)
-	return w.WriteMsg(mux.MsgData, cksum)
+	_, err := w.Write(cksum)
+	return err
 }
 
 // selector holds a parsed file selector from the client.
@@ -290,56 +322,119 @@ type selector struct {
 	version int
 }
 
-// readSelector reads a file selector from the mux stream.
-// Selectors are sent as MSG_DATA frames containing compressed NDX + item flags.
-// The NDX is delta-encoded, so the ndxState is maintained across calls.
-// For NDX_DONE (phase exchange), leftover bytes are pushed back to support streaming reads from batched frames.
-// For regular selectors, leftover bytes are discarded to avoid interfering with subsequent protocol messages.
+// readSelector reads a file selector from the transparent mux stream.
+// For proto >= 30, the selector is a compressed NDX (1-5 bytes) followed by item flags (2 bytes LE for proto >= 29).
+// For proto < 30, it's a plain int32 LE.
+// With the transparent mux layer, selectors are read as raw bytes from the stream, regardless of mux frame boundaries.
 func (s *ndxState) readSelector(r *mux.Reader, version int) (*selector, error) {
-	code, payload, err := r.ReadMsg()
-	if err != nil {
-		return nil, fmt.Errorf("read selector msg: %w", err)
-	}
-	if code != mux.MsgData {
-		return nil, fmt.Errorf("expected MSG_DATA for selector, got code %d", code)
-	}
-
-	if len(payload) == 0 {
-		return nil, fmt.Errorf("empty selector")
-	}
-
 	var ndx int32
-	var off int
 
 	if version < 30 {
 		// proto < 30: int32 LE
-		if len(payload) < 4 {
-			return nil, fmt.Errorf("selector too short for proto < 30: %d bytes", len(payload))
+		var buf [4]byte
+		if _, err := io.ReadFull(r, buf[:]); err != nil {
+			return nil, fmt.Errorf("read selector ndx: %w", err)
 		}
-		ndx = int32(binary.LittleEndian.Uint32(payload))
-		off = 4
+		ndx = int32(binary.LittleEndian.Uint32(buf[:]))
 	} else {
-		// proto >= 30: compressed NDX (delta-encoded)
+		// proto >= 30: compressed NDX read directly from stream
 		var err error
-		ndx, off, err = s.readCompressedNdx(payload)
+		ndx, err = s.readCompressedNdxFrom(r)
 		if err != nil {
 			return nil, fmt.Errorf("read compressed ndx: %w", err)
 		}
 	}
 
-	iflags := 0
-	if version >= 29 && off+2 <= len(payload) {
-		iflags = int(payload[off]) | int(payload[off+1])<<8
-		off += 2
-	}
-
-	// Only push back leftover bytes for NDX_DONE (phase exchange).
-	// For regular file selectors, discard leftovers to avoid interfering with delta stream reads in sendFile.
-	if ndx < 0 {
-		r.PushBuf(payload, off)
+	var iflags int
+	// NDX_DONE (-1) has no iflags; only actual file selectors do.
+	if version >= 29 && ndx >= 0 {
+		var buf [2]byte
+		if _, err := io.ReadFull(r, buf[:]); err != nil {
+			return nil, fmt.Errorf("read selector iflags: %w", err)
+		}
+		iflags = int(buf[0]) | int(buf[1])<<8
 	}
 
 	return &selector{ndx: ndx, iflags: iflags, version: version}, nil
+}
+
+// readCompressedNdxFrom reads a compressed NDX directly from the reader.
+// This is the streaming version of readCompressedNdx that works with the transparent mux Reader.
+func (s *ndxState) readCompressedNdxFrom(r io.Reader) (int32, error) {
+	b, err := readByte(r)
+	if err != nil {
+		return 0, err
+	}
+
+	// NDX_DONE: single byte 0x00, no side effects
+	if b == 0 {
+		return -1, nil
+	}
+
+	var prevPtr *int32
+	negate := false
+
+	if b == 0xFF {
+		// negative index prefix
+		negate = true
+		prevPtr = &s.prevNegative
+		b, err = readByte(r)
+		if err != nil {
+			return 0, err
+		}
+	} else {
+		prevPtr = &s.prevPositive
+	}
+
+	var num int32
+
+	if b == 0xFE {
+		var buf [4]byte
+		buf[0] = b
+		if _, err := io.ReadFull(r, buf[1:3]); err != nil {
+			return 0, err
+		}
+		if buf[1]&0x80 != 0 {
+			// 4-byte form: encodes the ABSOLUTE index (not a diff)
+			// Wire format: [0xFE, (abs>>24)|0x80, abs&0xFF, (abs>>8)&0xFF, (abs>>16)&0xFF]
+			var buf4 [1]byte
+			if _, err := io.ReadFull(r, buf[3:4]); err != nil {
+				return 0, err
+			}
+			if _, err := io.ReadFull(r, buf4[:]); err != nil {
+				return 0, err
+			}
+			num = int32(buf[2]) | int32(buf[3])<<8 | int32(buf4[0])<<16 | int32(buf[1]&0x7F)<<24
+			// 4-byte form is absolute, don't add diff
+		} else {
+			// 2-byte form: big-endian diff
+			num = int32(buf[1])<<8 | int32(buf[2])
+			// 2-byte form is a diff, add to previous
+			num += *prevPtr
+		}
+	} else {
+		// 1-byte form: diff
+		num = int32(b)
+		// 1-byte form is a diff, add to previous
+		num += *prevPtr
+	}
+
+	*prevPtr = num
+
+	if negate {
+		num = -num
+	}
+
+	return num, nil
+}
+
+// readByte reads a single byte from the reader.
+func readByte(r io.Reader) (byte, error) {
+	var buf [1]byte
+	if _, err := io.ReadFull(r, buf[:]); err != nil {
+		return 0, err
+	}
+	return buf[0], nil
 }
 
 // ndxState tracks delta-encoding state for compressed NDX.

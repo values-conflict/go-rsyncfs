@@ -655,13 +655,10 @@ func TestWriteSelector_ItemFlags(t *testing.T) {
 	if err := s.writeSelector(0, itemTransfer); err != nil {
 		t.Fatalf("writeSelector failed: %v", err)
 	}
-	// Read the mux frame and verify the payload
-	code, payload, err := mux.NewReader(&buf).ReadMsg()
+	// Read the transparent payload and verify
+	payload, err := mux.NewReader(&buf).ReadDataChunk()
 	if err != nil {
-		t.Fatalf("ReadMsg: %v", err)
-	}
-	if code != mux.MsgData {
-		t.Errorf("expected MSG_DATA, got code %d", code)
+		t.Fatalf("ReadDataChunk: %v", err)
 	}
 	want := []byte{0x01, 0x00, 0x80}
 	if !bytes.Equal(payload, want) {
@@ -675,12 +672,9 @@ func TestWriteSelector_ItemFlags(t *testing.T) {
 	if err := s.writeSelector(0, 0); err != nil {
 		t.Fatalf("writeSelector(proto=28) failed: %v", err)
 	}
-	code, payload, err = mux.NewReader(&buf).ReadMsg()
+	payload, err = mux.NewReader(&buf).ReadDataChunk()
 	if err != nil {
-		t.Fatalf("ReadMsg: %v", err)
-	}
-	if code != mux.MsgData {
-		t.Errorf("expected MSG_DATA, got code %d", code)
+		t.Fatalf("ReadDataChunk: %v", err)
 	}
 	want = []byte{0, 0, 0, 0} // plain int32 LE for ndx=0
 	if !bytes.Equal(payload, want) {

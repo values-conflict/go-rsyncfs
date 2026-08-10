@@ -109,17 +109,15 @@ func TestComputeSumHead_ThreeBlocks(t *testing.T) {
 }
 
 func TestComputeSumHead_LargeFile(t *testing.T) {
-	// for file just above BLOCK_SIZE^2, sqrt is ~700, so block stays at 700
 	sh := computeSumHead(defaultBlockSize*defaultBlockSize+1, 30)
 	if sh.blength != defaultBlockSize {
-		t.Errorf("blength = %d, want %d (sqrt of 490001 is ~700)", sh.blength, defaultBlockSize)
+		t.Errorf("blength = %d, want %d", sh.blength, defaultBlockSize)
 	}
 	if sh.blength > maxBlockSize {
 		t.Errorf("blength = %d, want <= %d", sh.blength, maxBlockSize)
 	}
 
-	// for a genuinely large file, block size should grow
-	sh2 := computeSumHead(1<<20, 30) // 1MB
+	sh2 := computeSumHead(1<<20, 30)
 	if sh2.blength <= defaultBlockSize {
 		t.Errorf("1MB file: blength = %d, want > %d", sh2.blength, defaultBlockSize)
 	}
@@ -184,17 +182,14 @@ func TestWriteSumHead(t *testing.T) {
 	if err := writeSumHead(w, sh, 30); err != nil {
 		t.Fatalf("writeSumHead failed: %v", err)
 	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 
 	r := mux.NewReader(bytes.NewReader(buf.Bytes()))
-	code, payload, err := r.ReadMsg()
-	if err != nil {
-		t.Fatalf("read msg: %v", err)
-	}
-	if code != mux.MsgData {
-		t.Errorf("expected MsgData, got %d", code)
-	}
-	if len(payload) != 16 {
-		t.Fatalf("payload len = %d, want 16", len(payload))
+	payload := make([]byte, 16)
+	if _, err := io.ReadFull(r, payload); err != nil {
+		t.Fatalf("read: %v", err)
 	}
 
 	count := int32(binary.LittleEndian.Uint32(payload[0:4]))
@@ -224,17 +219,14 @@ func TestWriteSumHead_Protocol26(t *testing.T) {
 	if err := writeSumHead(w, sh, 26); err != nil {
 		t.Fatalf("writeSumHead failed: %v", err)
 	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 
 	r := mux.NewReader(bytes.NewReader(buf.Bytes()))
-	code, payload, err := r.ReadMsg()
-	if err != nil {
-		t.Fatalf("read msg: %v", err)
-	}
-	if code != mux.MsgData {
-		t.Errorf("expected MsgData, got %d", code)
-	}
-	if len(payload) != 12 {
-		t.Fatalf("payload len = %d, want 12 (no s2length for proto < 27)", len(payload))
+	payload := make([]byte, 12)
+	if _, err := io.ReadFull(r, payload); err != nil {
+		t.Fatalf("read: %v", err)
 	}
 
 	count := int32(binary.LittleEndian.Uint32(payload[0:4]))
@@ -265,11 +257,14 @@ func TestWriteSumHead_SerializesCorrectly(t *testing.T) {
 	if err := writeSumHead(w, sh, 30); err != nil {
 		t.Fatalf("writeSumHead failed: %v", err)
 	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 
 	r := mux.NewReader(bytes.NewReader(buf.Bytes()))
-	_, payload, err := r.ReadMsg()
-	if err != nil {
-		t.Fatalf("read msg: %v", err)
+	payload := make([]byte, 16)
+	if _, err := io.ReadFull(r, payload); err != nil {
+		t.Fatalf("read: %v", err)
 	}
 
 	fields := []struct {
@@ -300,14 +295,14 @@ func TestSendBlockChecksums(t *testing.T) {
 	if err := sendBlockChecksums(w, data, sh); err != nil {
 		t.Fatalf("sendBlockChecksums failed: %v", err)
 	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 
 	r := mux.NewReader(bytes.NewReader(buf.Bytes()))
-	code, payload, err := r.ReadMsg()
-	if err != nil {
-		t.Fatalf("read msg: %v", err)
-	}
-	if code != mux.MsgData {
-		t.Errorf("expected MsgData, got %d", code)
+	payload := make([]byte, int(sh.count)*(4+int(sh.s2length)))
+	if _, err := io.ReadFull(r, payload); err != nil {
+		t.Fatalf("read: %v", err)
 	}
 
 	expectedSize := int(sh.count) * (4 + int(sh.s2length))
@@ -337,18 +332,14 @@ func TestSendBlockChecksums_TwoBlocks(t *testing.T) {
 	if err := sendBlockChecksums(w, data, sh); err != nil {
 		t.Fatalf("sendBlockChecksums failed: %v", err)
 	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 
 	r := mux.NewReader(bytes.NewReader(buf.Bytes()))
-	code, payload, err := r.ReadMsg()
-	if err != nil {
-		t.Fatalf("read msg: %v", err)
-	}
-	if code != mux.MsgData {
-		t.Errorf("expected MsgData, got %d", code)
-	}
-
-	if len(payload) != 40 {
-		t.Fatalf("payload len = %d, want 40", len(payload))
+	payload := make([]byte, 40)
+	if _, err := io.ReadFull(r, payload); err != nil {
+		t.Fatalf("read: %v", err)
 	}
 
 	block0 := data[0:700]
@@ -374,11 +365,14 @@ func TestSendBlockChecksums_ZeroBlocks(t *testing.T) {
 	if err := sendBlockChecksums(w, []byte{}, sh); err != nil {
 		t.Fatalf("sendBlockChecksums failed: %v", err)
 	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 
 	r := mux.NewReader(bytes.NewReader(buf.Bytes()))
-	_, payload, err := r.ReadMsg()
+	payload, err := io.ReadAll(r)
 	if err != nil {
-		t.Fatalf("read msg: %v", err)
+		t.Fatalf("read: %v", err)
 	}
 	if len(payload) != 0 {
 		t.Errorf("payload len = %d, want 0 for zero blocks", len(payload))
@@ -393,14 +387,14 @@ func TestSendFileChecksum(t *testing.T) {
 	if err := sendFileChecksum(w, data, 16); err != nil {
 		t.Fatalf("sendFileChecksum failed: %v", err)
 	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 
 	r := mux.NewReader(bytes.NewReader(buf.Bytes()))
-	code, payload, err := r.ReadMsg()
-	if err != nil {
-		t.Fatalf("read msg: %v", err)
-	}
-	if code != mux.MsgData {
-		t.Errorf("expected MsgData, got %d", code)
+	payload := make([]byte, 16)
+	if _, err := io.ReadFull(r, payload); err != nil {
+		t.Fatalf("read: %v", err)
 	}
 	want := checksum2(data, 16)
 	if !bytes.Equal(payload, want) {
@@ -416,11 +410,14 @@ func TestSendFileChecksum_Verification(t *testing.T) {
 	if err := sendFileChecksum(w, data, 16); err != nil {
 		t.Fatalf("sendFileChecksum failed: %v", err)
 	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
 
 	r := mux.NewReader(bytes.NewReader(buf.Bytes()))
-	_, payload, err := r.ReadMsg()
-	if err != nil {
-		t.Fatalf("read msg: %v", err)
+	payload := make([]byte, 16)
+	if _, err := io.ReadFull(r, payload); err != nil {
+		t.Fatalf("read: %v", err)
 	}
 
 	want := checksum2(data, 16)
@@ -455,7 +452,7 @@ func TestParseDeltaStream_LiteralAndToken(t *testing.T) {
 	delta := make([]byte, 4+5+4+4)
 	binary.LittleEndian.PutUint32(delta[0:4], 5)
 	copy(delta[4:9], []byte("hello"))
-	binary.LittleEndian.PutUint32(delta[9:13], 0xFFFFFFFF) // token = -1 (block 0)
+	binary.LittleEndian.PutUint32(delta[9:13], 0xFFFFFFFF)
 	binary.LittleEndian.PutUint32(delta[13:17], 0)
 
 	sh := sumHead{count: 2, blength: 700}
@@ -468,7 +465,7 @@ func TestParseDeltaStream_MultipleLiterals(t *testing.T) {
 	delta := make([]byte, 4+5+4+4+5+4)
 	binary.LittleEndian.PutUint32(delta[0:4], 5)
 	copy(delta[4:9], []byte("hello"))
-	binary.LittleEndian.PutUint32(delta[9:13], 0xFFFFFFFF) // token 0
+	binary.LittleEndian.PutUint32(delta[9:13], 0xFFFFFFFF)
 	binary.LittleEndian.PutUint32(delta[13:17], 5)
 	copy(delta[17:22], []byte("world"))
 	binary.LittleEndian.PutUint32(delta[22:26], 0)
@@ -481,7 +478,7 @@ func TestParseDeltaStream_MultipleLiterals(t *testing.T) {
 
 func TestParseDeltaStream_InvalidBlockIndex(t *testing.T) {
 	delta := make([]byte, 4+4)
-	binary.LittleEndian.PutUint32(delta[0:4], 0xFFFFFF9C) // token = -100
+	binary.LittleEndian.PutUint32(delta[0:4], 0xFFFFFF9C)
 	binary.LittleEndian.PutUint32(delta[4:8], 0)
 
 	sh := sumHead{count: 2, blength: 700}
@@ -540,7 +537,6 @@ func TestSendFile_FullRoundTrip(t *testing.T) {
 
 	serverConn, clientConn := net.Pipe()
 
-	// server side (sender)
 	go func() {
 		defer serverConn.Close()
 		f := &fakeFile{data: fileData}
@@ -552,57 +548,58 @@ func TestSendFile_FullRoundTrip(t *testing.T) {
 		}
 	}()
 
-	// client side (receiver) -- simulate the delta protocol
 	go func() {
 		defer clientConn.Close()
 		r := mux.NewReader(clientConn)
 		w := mux.NewWriter(clientConn)
 
-		// read sum_head
-		code, payload, err := r.ReadMsg()
-		if err != nil {
+		// read sum_head (16 bytes)
+		sumHeadBuf := make([]byte, 16)
+		if _, err := io.ReadFull(r, sumHeadBuf); err != nil {
 			t.Logf("read sum_head: %v", err)
 			return
 		}
-		if code != mux.MsgData {
-			t.Logf("expected MsgData, got %d", code)
-			return
-		}
-
-		count := int32(binary.LittleEndian.Uint32(payload[0:4]))
-		_ = count
+		count := int32(binary.LittleEndian.Uint32(sumHeadBuf[0:4]))
+		s2length := int32(binary.LittleEndian.Uint32(sumHeadBuf[8:12]))
 
 		// read block checksums
-		code, _, err = r.ReadMsg()
-		if err != nil {
-			t.Logf("read block checksums: %v", err)
-			return
+		if count > 0 {
+			cksumBuf := make([]byte, int(count)*(4+int(s2length)))
+			if _, err := io.ReadFull(r, cksumBuf); err != nil {
+				t.Logf("read block checksums: %v", err)
+				return
+			}
 		}
 
 		// send delta stream: token references for all blocks
 		var deltaBuf []byte
 		for i := int32(0); i < count; i++ {
-			token := -(i + 1) // token reference for block i
+			token := -(i + 1)
 			var b [4]byte
 			binary.LittleEndian.PutUint32(b[:], uint32(token))
 			deltaBuf = append(deltaBuf, b[:]...)
 		}
-		// end of stream
 		deltaBuf = append(deltaBuf, 0, 0, 0, 0)
 
-		if err := w.WriteMsg(mux.MsgData, deltaBuf); err != nil {
+		if _, err := w.Write(deltaBuf); err != nil {
 			t.Logf("write delta: %v", err)
 			return
 		}
-
-		// read file data
-		code, dataPayload, err := r.ReadMsg()
-		if err != nil {
-			t.Logf("read file data: %v", err)
+		if err := w.Flush(); err != nil {
+			t.Logf("flush delta: %v", err)
 			return
 		}
-		if code != mux.MsgData {
-			t.Logf("expected MsgData for file data, got %d", code)
+
+		// read file data (exact size known from sum_head)
+		blength := int32(binary.LittleEndian.Uint32(sumHeadBuf[4:8]))
+		remainder := int32(binary.LittleEndian.Uint32(sumHeadBuf[12:16]))
+		fileSize := int64(count)*int64(blength) - int64(blength) + int64(remainder)
+		if count == 0 {
+			fileSize = 0
+		}
+		dataPayload := make([]byte, fileSize)
+		if _, err := io.ReadFull(r, dataPayload); err != nil {
+			t.Logf("read file data: %v", err)
 			return
 		}
 		if !bytes.Equal(dataPayload, fileData) {
@@ -610,17 +607,10 @@ func TestSendFile_FullRoundTrip(t *testing.T) {
 			return
 		}
 
-		// read file checksum
-		code, _, err = r.ReadMsg()
-		if err != nil {
-			t.Logf("read file checksum: %v", err)
-			return
-		}
-
 		// send MSG_SUCCESS
 		successPayload := make([]byte, 4)
 		binary.LittleEndian.PutUint32(successPayload, 0)
-		if err := w.WriteMsg(mux.MsgSuccess, successPayload); err != nil {
+		if err := w.SendMsg(mux.MsgSuccess, successPayload); err != nil {
 			t.Logf("write success: %v", err)
 			return
 		}
@@ -819,25 +809,22 @@ func TestSendFile_LargeFile(t *testing.T) {
 		w := mux.NewWriter(clientConn)
 
 		// read sum_head
-		_, payload, err := r.ReadMsg()
-		if err != nil {
+		sumHeadBuf := make([]byte, 16)
+		if _, err := io.ReadFull(r, sumHeadBuf); err != nil {
 			t.Logf("read sum_head: %v", err)
 			return
 		}
-		count := int32(binary.LittleEndian.Uint32(payload[0:4]))
+		count := int32(binary.LittleEndian.Uint32(sumHeadBuf[0:4]))
+		s2length := int32(binary.LittleEndian.Uint32(sumHeadBuf[8:12]))
 		if count != 3 {
 			t.Logf("expected 3 blocks, got %d", count)
 			return
 		}
 
 		// read block checksums
-		_, payload, err = r.ReadMsg()
-		if err != nil {
+		cksumBuf := make([]byte, int(count)*(4+int(s2length)))
+		if _, err := io.ReadFull(r, cksumBuf); err != nil {
 			t.Logf("read checksums: %v", err)
-			return
-		}
-		if len(payload) != 60 {
-			t.Logf("checksum payload = %d, want 60", len(payload))
 			return
 		}
 
@@ -851,19 +838,25 @@ func TestSendFile_LargeFile(t *testing.T) {
 		}
 		deltaBuf = append(deltaBuf, 0, 0, 0, 0)
 
-		if err := w.WriteMsg(mux.MsgData, deltaBuf); err != nil {
+		if _, err := w.Write(deltaBuf); err != nil {
 			t.Logf("write delta: %v", err)
 			return
 		}
-
-		// read file data
-		code, dataPayload, err := r.ReadMsg()
-		if err != nil {
-			t.Logf("read file data: %v", err)
+		if err := w.Flush(); err != nil {
+			t.Logf("flush delta: %v", err)
 			return
 		}
-		if code != mux.MsgData {
-			t.Logf("expected MsgData for file data, got %d", code)
+
+		// read file data (exact size known from sum_head)
+		blength := int32(binary.LittleEndian.Uint32(sumHeadBuf[4:8]))
+		remainder := int32(binary.LittleEndian.Uint32(sumHeadBuf[12:16]))
+		fileSize := int64(count)*int64(blength) - int64(blength) + int64(remainder)
+		if count == 0 {
+			fileSize = 0
+		}
+		dataPayload := make([]byte, fileSize)
+		if _, err := io.ReadFull(r, dataPayload); err != nil {
+			t.Logf("read file data: %v", err)
 			return
 		}
 		if !bytes.Equal(dataPayload, fileData) {
@@ -871,15 +864,8 @@ func TestSendFile_LargeFile(t *testing.T) {
 			return
 		}
 
-		// read file checksum
-		_, _, err = r.ReadMsg()
-		if err != nil {
-			t.Logf("read checksum: %v", err)
-			return
-		}
-
-		// send success
-		if err := w.WriteMsg(mux.MsgSuccess, []byte{0, 0, 0, 0}); err != nil {
+		// send MSG_SUCCESS
+		if err := w.SendMsg(mux.MsgSuccess, []byte{0, 0, 0, 0}); err != nil {
 			t.Logf("write success: %v", err)
 			return
 		}

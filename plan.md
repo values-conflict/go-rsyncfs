@@ -367,6 +367,67 @@ func (s *Session) Open(name string) (fs.File, error)
 - Version-specific wire format tests (e.g., varint only appears ≥ 30, extended xflags ≥ 28)
 - Fallback behavior when features are unavailable at lower versions
 
+### ~~Task 13 -- Transparent mux buffering (`protocol/mux/`)~~
+
+**Goal:** Add transparent buffered I/O to the mux layer, matching upstream's iobuf model.  This enables correct upstream rsync interop by allowing multiple protocol writes to be batched into single mux frames, and presenting a transparent byte stream to readers.
+
+**Files:** `protocol/mux/mux.go`, `protocol/mux/mux_test.go`
+
+**Background:** Upstream rsync's iobuf layer has two separate output paths: `iobuf.out` for MSG_DATA (transparently buffered, 32KB default) and `iobuf.msg` for non-DATA messages (sent as separate frames).  Application code calls `write_buf()`/`read_buf()` and never sees mux headers -- the iobuf layer transparently batches writes into MSG_DATA frames and unwraps them on reads.  Our current explicit-frame API (`WriteMsg`/`ReadMsg`) cannot handle upstream's batching behavior, causing protocol desync when the real rsync client batches selector + sum_head in one frame.
+
+**API sketch:**
+
+```go
+// Writer supports both buffered (transparent) and explicit message writes.
+type Writer struct {
+    w   io.Writer
+    buf bytes.Buffer  // accumulates raw writes for batching (32KB default)
+}
+
+// Write accumulates raw bytes.  They will be sent as MSG_DATA on Flush().
+// This matches upstream's write_buf() behavior.
+func (w *Writer) Write(p []byte) (n int, err error)
+
+// Flush sends accumulated data as MSG_DATA frame(s).
+// Called automatically before SendMsg to ensure ordering.
+func (w *Writer) Flush() error
+
+// SendMsg sends a non-DATA message (MSG_SUCCESS, MSG_ERROR, etc.).
+// Flushes any pending buffered data first, matching upstream's send_msg().
+func (w *Writer) SendMsg(code uint8, payload []byte) error
+
+// Reader supports both buffered (transparent) and explicit message reads.
+type Reader struct {
+    r   io.Reader
+    buf bytes.Buffer  // accumulated payload from MSG_DATA frames
+}
+
+// Read from the transparent buffer.  Fetches more MSG_DATA frames as needed.
+// This matches upstream's read_buf() behavior.
+func (r *Reader) Read(p []byte) (n int, err error)
+
+// RecvMsg reads a non-DATA message.  Skips any pending MSG_DATA data.
+func (r *Reader) RecvMsg() (code uint8, payload []byte, err error)
+```
+
+**Key details:**
+
+- Buffer size: 32KB (`IO_BUFFER_SIZE` in upstream), matching upstream's default
+- `Write()` accumulates raw bytes; `Flush()` sends them as MSG_DATA frame(s)
+- `SendMsg()` automatically flushes pending buffered data first (ensures MSG_DATA before control messages)
+- `Read()` transparently fetches MSG_DATA frames as the buffer drains
+- `RecvMsg()` reads non-DATA frames, skipping any pending MSG_DATA payload
+- `ReadDataChunk()` reads a single MSG_DATA frame payload (for bounded reads like file lists)
+
+**Tests:**
+
+- Round-trip buffered writes through `io.Pipe()`
+- Verify batching: multiple small Writes produce single MSG_DATA frame on Flush
+- Verify SendMsg flushes pending data before sending control message
+- Verify Read transparently spans multiple MSG_DATA frames
+- Verify RecvMsg correctly skips MSG_DATA data
+- Edge cases: zero writes, buffer exactly at limit, split reads across frames
+
 ## Protocol Version Coverage & Testing Strategy
 
 ### Detailed Protocol Support Requirements:
