@@ -96,8 +96,18 @@ func (s *Server) HandleConnection(rw io.ReadWriter, opts HandleOptions) error {
 			if phase > maxPhase {
 				break
 			}
-			if _, err := mw.Write([]byte{0}); err != nil {
-				return fmt.Errorf("write ndx done: %w", err)
+			// For proto >= 30: compressed NDX_DONE is single byte 0x00
+			// For proto < 30: plain int32 LE of -1 (0xFFFFFFFF)
+			if result.Version >= 30 {
+				if _, err := mw.Write([]byte{0}); err != nil {
+					return fmt.Errorf("write ndx done: %w", err)
+				}
+			} else {
+				var ndxBuf [4]byte
+				binary.LittleEndian.PutUint32(ndxBuf[:], 0xFFFFFFFF)
+				if _, err := mw.Write(ndxBuf[:]); err != nil {
+					return fmt.Errorf("write ndx done: %w", err)
+				}
 			}
 			if err := mw.Flush(); err != nil {
 				return fmt.Errorf("flush ndx done: %w", err)
@@ -134,8 +144,16 @@ func (s *Server) HandleConnection(rw io.ReadWriter, opts HandleOptions) error {
 	// Server writes NDX_DONE to signal end of transfer, then reads the
 	// client's final NDX_DONE. For proto >= 31, there's an extra
 	// NDX_DONE round-trip (matching read_final_goodbye in upstream).
-	if _, err := mw.Write([]byte{0}); err != nil {
-		return nil // connection already closed, don't treat as error
+	if result.Version >= 30 {
+		if _, err := mw.Write([]byte{0}); err != nil {
+			return nil
+		}
+	} else {
+		var ndxBuf [4]byte
+		binary.LittleEndian.PutUint32(ndxBuf[:], 0xFFFFFFFF)
+		if _, err := mw.Write(ndxBuf[:]); err != nil {
+			return nil
+		}
 	}
 	if err := mw.Flush(); err != nil {
 		return nil

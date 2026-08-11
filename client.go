@@ -258,12 +258,12 @@ func (c Client) Connect(rw io.ReadWriter) (*Session, error) {
 			return nil, fmt.Errorf("send client checksum list: %w", err)
 		}
 		_ = serverChecksums // negotiated checksum would be stored here
+	}
 
-		// read checksum seed from server (4 bytes LE)
-		var seedBuf [4]byte
-		if _, err := io.ReadFull(rw, seedBuf[:]); err != nil {
-			return nil, fmt.Errorf("read checksum seed: %w", err)
-		}
+	// --- Checksum Seed Exchange (always, for all protocol versions) ---
+	var seedBuf [4]byte
+	if _, err := io.ReadFull(rw, seedBuf[:]); err != nil {
+		return nil, fmt.Errorf("read checksum seed: %w", err)
 	}
 
 	// --- Switch to multiplexed I/O ---

@@ -322,8 +322,8 @@ For cases 2 and 3, encode the diff:
    - `0xFF` → read next byte into `b[0]`, use `prev_negative` as tracking variable, result will be negated
    - `0x01-0xFD` → `result = byte_value + prev_positive`, update `prev_positive` (1-byte diff form)
    - `0xFE` → read next byte into `b[0]`:
-     - High bit set (`b[0] & 0x80`): read 3 more bytes into `b[1..3]`, reconstruct as LE int32 with high byte from `(b[0]&0x7F)`.  **This is the absolute index, NOT a diff.**  Update tracker to this value.  Wire format: `[0xFE, (abs>>24)|0x80, abs&0xFF, (abs>>8)&0xFF, (abs>>16)&0xFF]`
-     - High bit clear: read 1 more byte into `b[1]`, `num = (b[0]<<8 | b[1]) + *prev_ptr` (2-byte diff form)
+     - High bit set (`b[0] & 0x80`): 4-byte form.  Read 2 more bytes into `b[1..2]`.  Rearrange to LE int32: `b[3]=(b[0]&0x7F), b[0]=b[1], b[1]=b[2], b[2]=b[3]`, then `num = IVAL(b, 0)`.  **This is the absolute index, NOT a diff.** Update tracker to this value.  Wire (5 bytes total): `[0xFE, (abs>>24)|0x80, abs&0xFF, (abs>>8)&0xFF, (abs>>16)&0xFF]`
+     - High bit clear: 2-byte form.  Read 1 more byte into `b[1]`, `num = (b[0]<<8 | b[1]) + *prev_ptr` (big-endian diff)
 
 For `0xFF` path, negate the final result before returning.
 
@@ -417,7 +417,7 @@ The buffer is treated as signed chars (`schar`), but `CHAR_OFFSET = 0` in modern
 **Checksum2 (strong hash):** Depends on negotiated digest algorithm.  All variants accept a 4-byte LE seed.
 - **MD4**: Default for most implementations.  Produces 16-byte digest.  Seed is **appended** to data: `MD4(data + seed_bytes)`.
 - **MD5**: Produces 16-byte digest.  Non-OpenSSL path: when `proper_seed_order` is set (via `CF_CHKSUM_SEED_FIX` compat flag): `MD5(seed_bytes + data)`, otherwise (legacy): `MD5(data + seed_bytes)`.  OpenSSL path always uses `MD5(seed_bytes + data)`.
-- **SHA-1/256/512**: Via OpenSSL. Always `hash(seed_bytes + data)`.
+- **SHA-1/256/512**: Via OpenSSL.  Always `hash(seed_bytes + data)`.
 - **XXH64/XXH3/XXH3-128**: Seed passed as the hash seed parameter.
 - Protocol ≥ 32 supports additional algorithms via the digest list in the greeting exchange.  The most preferred common algorithm from each side's advertised list wins.
 

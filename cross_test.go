@@ -522,3 +522,47 @@ func TestCross_MultiFileSingleConnection(t *testing.T) {
 		})
 	}
 }
+
+func TestCross_ProtocolVersions(t *testing.T) {
+	testFS := fstest.MapFS{
+		"file.txt": {Data: []byte("test data for protocol version testing")},
+	}
+	mod := &ServerModule{Name: "testmod", FS: testFS}
+	srv, _ := NewServer(mod)
+
+	// Only test proto 30-32 (older versions have different file list/selector formats)
+	for _, version := range []int{30, 31, 32} {
+		t.Run("", func(t *testing.T) {
+			serverConn, clientConn := net.Pipe()
+			go func() {
+				defer serverConn.Close()
+				_ = srv.HandleConnection(serverConn, HandleOptions{
+					LocalGreeting: protocol.Greeting{Version: version, SubProtocol: 0, Digests: []string{"md5"}},
+				})
+			}()
+
+			session, err := (&Client{
+				Module:   "testmod",
+				Greeting: protocol.Greeting{Version: version, SubProtocol: 0, Digests: []string{"md5"}},
+			}).Connect(clientConn)
+			if err != nil {
+				t.Fatalf("Connect failed: %v", err)
+			}
+			defer clientConn.Close()
+
+			f, err := session.Open("file.txt")
+			if err != nil {
+				t.Fatalf("Open(file.txt) failed: %v", err)
+			}
+			defer f.Close()
+
+			got, err := io.ReadAll(f)
+			if err != nil {
+				t.Fatalf("ReadAll failed: %v", err)
+			}
+			if !bytes.Equal(got, testFS["file.txt"].Data) {
+				t.Errorf("file data mismatch: got %d bytes, want %d", len(got), len(testFS["file.txt"].Data))
+			}
+		})
+	}
+}

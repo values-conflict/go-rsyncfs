@@ -32,6 +32,13 @@
 
 - can we somehow get creative with the `net.Pipe` usage / tests to avoid the goroutines entirely?
 
+- cross tests only cover proto 30/31/32; need to verify all supported versions (20–32) work end-to-end
+  - proto < 30: NDX is plain int32 LE, not compressed
+  - proto < 29: no item flags in selectors
+  - proto < 27: sum_head lacks s2length field (12 bytes instead of 16)
+  - phase exchange NDX_DONE format differs across versions
+  - checksum seed read was gated behind varintFlistFlags but server always sends it
+
 - rewrite `plan.md` as if the transparent buffering `mux` reader/writer was the plan all along (Task 13 shouldn't exist, or shouldn't happen so late)
 
 - our `protocol/mux` implementation doesn't actually bound the size of the buffer (and flush when it's full) - it will fill up forever, which may or may not cause issues at some point?  maybe it's fine but I don't think so - I think we need to probably flush more often so that the remote end knows what our progress is (and because TCP packets are not unbounded in size and our files might get big enough to trigger something like `bytes.ErrTooLarge` on our `bytes.Buffer`)

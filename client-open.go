@@ -353,31 +353,49 @@ func (s *Session) phaseExchange() error {
 
 	for phase := 0; phase < maxPhase; phase++ {
 		// Send NDX_DONE to server
-		if _, err := s.muxWriter.Write([]byte{0}); err != nil {
-			return fmt.Errorf("write phase ndx done: %w", err)
+		// For proto >= 30: compressed NDX_DONE is single byte 0x00
+		// For proto < 30: plain int32 LE of -1 (0xFFFFFFFF)
+		if s.version >= 30 {
+			if _, err := s.muxWriter.Write([]byte{0}); err != nil {
+				return fmt.Errorf("write phase ndx done: %w", err)
+			}
+		} else {
+			var ndxBuf [4]byte
+			binary.LittleEndian.PutUint32(ndxBuf[:], 0xFFFFFFFF)
+			if _, err := s.muxWriter.Write(ndxBuf[:]); err != nil {
+				return fmt.Errorf("write phase ndx done: %w", err)
+			}
 		}
 		if err := s.muxWriter.Flush(); err != nil {
 			return fmt.Errorf("flush phase ndx done: %w", err)
 		}
 		// Read server's NDX_DONE response from transparent stream
-		var ndxBuf [5]byte // max compressed NDX size
-		if _, err := io.ReadFull(s.muxReader, ndxBuf[:1]); err != nil {
-			return fmt.Errorf("read phase ndx done: %w", err)
-		}
-		// If not NDX_DONE (0x00), read more bytes for compressed form
-		if ndxBuf[0] != 0 && ndxBuf[0] != 0xFF {
-			if ndxBuf[0] == 0xFE {
-				if _, err := io.ReadFull(s.muxReader, ndxBuf[1:3]); err != nil {
-					return fmt.Errorf("read phase ndx done: %w", err)
-				}
-				if ndxBuf[1]&0x80 != 0 {
-					if _, err := io.ReadFull(s.muxReader, ndxBuf[3:4]); err != nil {
+		if s.version >= 30 {
+			// Compressed NDX: read first byte to determine form
+			var ndxBuf [5]byte
+			if _, err := io.ReadFull(s.muxReader, ndxBuf[:1]); err != nil {
+				return fmt.Errorf("read phase ndx done: %w", err)
+			}
+			if ndxBuf[0] != 0 && ndxBuf[0] != 0xFF {
+				if ndxBuf[0] == 0xFE {
+					if _, err := io.ReadFull(s.muxReader, ndxBuf[1:3]); err != nil {
 						return fmt.Errorf("read phase ndx done: %w", err)
 					}
+					if ndxBuf[1]&0x80 != 0 {
+						if _, err := io.ReadFull(s.muxReader, ndxBuf[3:4]); err != nil {
+							return fmt.Errorf("read phase ndx done: %w", err)
+						}
+					}
+				}
+			} else if ndxBuf[0] == 0xFF {
+				if _, err := io.ReadFull(s.muxReader, ndxBuf[1:2]); err != nil {
+					return fmt.Errorf("read phase ndx done: %w", err)
 				}
 			}
-		} else if ndxBuf[0] == 0xFF {
-			if _, err := io.ReadFull(s.muxReader, ndxBuf[1:2]); err != nil {
+		} else {
+			// Plain int32 LE
+			var ndxBuf [4]byte
+			if _, err := io.ReadFull(s.muxReader, ndxBuf[:]); err != nil {
 				return fmt.Errorf("read phase ndx done: %w", err)
 			}
 		}
