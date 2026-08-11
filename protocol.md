@@ -153,7 +153,26 @@ The seed is typically generated as `time(NULL) ^ (getpid() << 6)` on the server.
 
 ## Multiplexed I/O Layer
 
-Once Phase 4 begins, **all data on the socket flows through the multiplexed I/O layer**.  This includes file lists, selectors, checksums, file data, and control messages.  The upstream iobuf system transparently wraps raw writes in `MSG_DATA` frames and unwraps them on reads, so code that calls `write_ndx()` or `read_ndx()` is actually sending/receiving `MSG_DATA` frames on the wire.
+### Protocol Version Dependency
+
+Multiplexed I/O is **protocol version dependent**.  The upstream code gates mux usage on `protocol_version`:
+
+| Side | Direction | Proto ≥ 31 | Proto 23-30 | Proto < 23 |
+|------|-----------|------------|-------------|------------|
+| **Daemon (server)** | output | multiplexed | multiplexed | multiplexed (proto 22) / buffered |
+| **Daemon (server)** | input | multiplexed* | buffered | multiplexed (proto 22) / buffered |
+| **Client sender** | output | multiplexed | multiplexed (proto ≥ 30) / buffered (< 30) | buffered |
+| **Client sender** | input | multiplexed | buffered | buffered |
+| **Client receiver** | output | multiplexed | buffered | buffered |
+| **Client receiver** | input | multiplexed | multiplexed | buffered |
+
+\* Daemon input is multiplexed only when `am_sender && need_messages_from_generator`; otherwise buffered.
+
+**Key sources:** `start_server()` in main.c:1257 (daemon), `client_run()` in main.c:1290 (client).
+
+**Implication:** For proto ≥ 31, both sides use multiplexed I/O in both directions.  For proto 30, the client sender uses multiplexed output but buffered input.  For proto 23-29, mixing occurs.  Our implementation uses mux for all proto ≥ 30, which matches upstream for the common case.
+
+Once Phase 4 begins, **all data on the socket flows through the multiplexed I/O layer** (when mux is enabled).  This includes file lists, selectors, checksums, file data, and control messages.  The upstream iobuf system transparently wraps raw writes in `MSG_DATA` frames and unwraps them on reads, so code that calls `write_ndx()` or `read_ndx()` is actually sending/receiving `MSG_DATA` frames on the wire.
 
 Every frame: 4-byte header + payload.  Header is a **little-endian uint32**:
 ```
@@ -345,6 +364,31 @@ The `maxPhase` is **2** for `protocol >= 29` and **1** for older protocols.  The
 - Client reads server's NDX_DONE → phase=3 > maxPhase=2, exits loop
 - Server then reads selectors (or NDX_DONE if no files to transfer)
 
+#### Client-Side Process Architecture (Generator + Receiver)
+
+The rsync client runs as **two cooperating processes** connected by a pipe:
+
+- **Generator** -- connects to the remote daemon, receives the file list, sends selectors to the daemon, receives file data from the daemon
+- **Receiver** -- receives file data from the generator (via pipe), writes files to disk
+
+**Data flow:**
+```
+Daemon socket:  Generator ↔ Daemon
+Internal pipe:  Generator ← Receiver  (receiver writes to generator)
+```
+
+**Critical detail:** The generator and receiver use **different I/O functions** for NDX_DONE:
+- **Generator** (`generator.c`): uses `write_ndx(f_out, NDX_DONE)` → compressed NDX (1 byte `0x00` for proto ≥ 30)
+- **Receiver** (`receiver.c`): uses `write_int(f_out, NDX_DONE)` → fixed 4-byte LE int32 (`0xFFFFFFFF` for -1)
+
+The receiver's `write_int` goes to the **generator via the internal pipe** (not the daemon socket).  The generator's `write_ndx` goes to the **daemon socket**.  These are separate channels and must not be confused.
+
+**Source verification:**
+- Generator phase exchange: `generator.c:2390` → `write_ndx(f_out, NDX_DONE)`
+- Receiver phase exchange: `receiver.c:696` → `write_int(f_out, NDX_DONE)`
+- Generator setup: `main.c:1121` → `io_start_buffering_out(f_out)` (to daemon socket)
+- Receiver setup: `main.c:1072` → `io_start_multiplex_out(f_out)` (to generator pipe)
+
 ### File Selector Protocol (after phase exchange)
 
 After the phase exchange, the client sends **selectors** to request specific files for transfer.  Each selector is sent as a **`MSG_DATA` mux frame** containing:
@@ -358,6 +402,8 @@ iflags    : shortint (2 bytes LE) -- item flags (proto ≥ 29)
 ```
 
 **Important:** Although the upstream code calls `write_ndx()` and `write_shortint()` (which appear to be raw writes), these are transparently wrapped in `MSG_DATA` frames by the iobuf system.  The selector is a `MSG_DATA` mux frame on the wire.  This allows selectors and file data to interleave correctly on the same socket.  The NDX is delta-encoded and stateful (tracking `prev_positive` and `prev_negative` independently), so selectors must be read in order.
+
+**Server-side selector handling (`read_ndx_and_attrs`):** The server's `send_files()` in `sender.c` calls `read_ndx_and_attrs(f_in, f_out, &iflags, ...)`.  This function **reads the selector from `f_in` AND echoes it to `f_out`** simultaneously.  Every selector (including NDX_DONE) is echoed back to the client.  For non-TRANSFER selectors (e.g., reporting selectors with `ITEM_REPORT_*` flags), the server echoes the selector and continues without sending file data.  For TRANSFER selectors (`iflags & ITEM_TRANSFER`), the server echoes the selector, then sends sum_head + block checksums + file data.
 
 #### Item Flags (from rsync.h)
 
