@@ -368,14 +368,17 @@ The `maxPhase` is **2** for `protocol >= 29` and **1** for older protocols.  The
 
 The rsync client runs as **two cooperating processes** connected by a pipe:
 
-- **Generator** -- connects to the remote daemon, receives the file list, sends selectors to the daemon, receives file data from the daemon
-- **Receiver** -- receives file data from the generator (via pipe), writes files to disk
+- **Generator** -- connects to the remote daemon, receives the file list, sends selectors to the daemon, reads status from the receiver
+- **Receiver** -- reads file data from the daemon socket, writes files to disk, sends status to the generator
 
 **Data flow:**
 ```
-Daemon socket:  Generator ↔ Daemon
-Internal pipe:  Generator ← Receiver  (receiver writes to generator)
+Daemon socket:  Generator → Daemon   (selectors, NDX_DONE, raw bytes)
+Daemon socket:  Receiver  ← Daemon   (echoed selectors, file data, checksums, MSG_DATA frames)
+Internal pipe:  Generator ← Receiver (echoed selectors, status messages, NDX_DONE, MSG_DATA frames)
 ```
+
+The generator sends selectors to the daemon via buffered output (raw bytes).  The daemon's `read_ndx_and_attrs()` echoes each selector back to the client, wrapped in MSG_DATA frames by the multiplexed output layer.  The receiver reads these echoed selectors from the daemon socket, then re-echoes them to the generator via the internal pipe (also multiplexed).  The receiver also reads file data and checksums from the daemon, and writes files to disk.
 
 **Critical detail:** The generator and receiver use **different I/O functions** for NDX_DONE:
 - **Generator** (`generator.c`): uses `write_ndx(f_out, NDX_DONE)` → compressed NDX (1 byte `0x00` for proto ≥ 30)
@@ -388,6 +391,24 @@ The receiver's `write_int` goes to the **generator via the internal pipe** (not 
 - Receiver phase exchange: `receiver.c:696` → `write_int(f_out, NDX_DONE)`
 - Generator setup: `main.c:1121` → `io_start_buffering_out(f_out)` (to daemon socket)
 - Receiver setup: `main.c:1072` → `io_start_multiplex_out(f_out)` (to generator pipe)
+
+#### I/O Mode per Channel
+
+The three communication channels use different I/O modes:
+
+| Channel | Direction | Output Mode | Input Mode | Notes |
+|---------|-----------|-------------|------------|-------|
+| **Generator → Daemon** | Socket | Buffered | -- | Generator sends raw bytes (selectors, NDX_DONE) |
+| **Daemon → Client** | Socket | Multiplexed | Buffered* | Daemon muxes output (echoed selectors, file data) |
+| **Receiver → Generator** | Pipe | Multiplexed | Multiplexed | Echoed selectors, control messages, NDX_DONE (4-byte int) |
+
+\* Daemon input (`io_start_buffering_in`) reads raw bytes from generator.  Daemon input is multiplexed only when `am_sender && need_messages_from_generator`.
+
+**Key distinction:** The generator→daemon socket uses **buffered output** (raw bytes, no mux wrapping).  The generator calls `write_ndx()` which writes compressed NDX directly to the iobuf.out buffer, and this buffer is flushed as raw bytes (not MSG_DATA frames).  The daemon reads these raw bytes via `io_start_buffering_in()`.
+
+The daemon→client socket uses **multiplexed output** (MSG_DATA frames).  The daemon echoes selectors and sends file data, wrapped in MSG_DATA frames by the mux layer.  The receiver reads these frames via multiplexed input.
+
+The receiver→generator pipe uses **multiplexed I/O** in both directions.  The receiver echoes selectors and sends `write_int(f_out, NDX_DONE)` (4 bytes), wrapped in MSG_DATA frames.  The generator reads them via `wait_for_receiver()` → `read_a_msg()` which unwraps MSG_DATA frames and extracts the raw payload.
 
 ### File Selector Protocol (after phase exchange)
 
