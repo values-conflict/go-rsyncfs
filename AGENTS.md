@@ -6,7 +6,7 @@ This repo follows [tianonfmt](https://github.com/values-conflict/tianonfmt) in C
 
 Project-specific Go coding standards are in `coding-standards-go.md`
 
-Upstream (pinned to the most recent commit checked for upstream compatibility) is in a submodule at `.upstream` (suitable for `git -C .upstream grep ...`, etc)
+Upstream (pinned to the most recent commit checked for upstream compatibility) is in a submodule at `.upstream` (suitable for `git -C .upstream grep ...`, etc) -- inside `.upstream/old_versions` there are a bunch of upstream-maintained static builds of rsync versions targeting different protocol versions (see `.upstream/old_versions/README.md` for which binary prefers which protocol version)
 
 There is a rough summary of the upstream protocol in `protocol.md`, focused on details useful to implementing our tasks -- when ambiguous or too light on details, fall back on reading the upstream sources, and proactively update `protocol.md` so it remains a complete and functional reference
 
