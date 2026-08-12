@@ -44,5 +44,3 @@
 - our `protocol/mux` implementation doesn't actually bound the size of the buffer (and flush when it's full) - it will fill up forever, which may or may not cause issues at some point?  maybe it's fine but I don't think so - I think we need to probably flush more often so that the remote end knows what our progress is (and because TCP packets are not unbounded in size and our files might get big enough to trigger something like `bytes.ErrTooLarge` on our `bytes.Buffer`)
 
 - if `.upstream/rsync` exists, `integration_test.go` should prefer it (maybe even before consulting `PATH`? we should explore pros/cons of this)
-
-- create a better map of upstream's protocol code, especially across different protocol versions and taking into account the generator/receiver split that always makes the code so hard to trace
