@@ -8,8 +8,11 @@
   - why does `NewFlistReader` take `[]byte` but `NewFlistWriter` takes `io.Writer`?  should the former take `io.Reader`?  does this get called in such a way that we were forced to pre-read the bytes off the wire?
 
   - we should make it clear in the godoc that `WriteGreeting` will mutate the provided `Greeting` object to normalize zero-value fields -- protocol version to `CurrentProtocolVersion`, `Digests` to `SupportedDigests()`, etc (unless there is a better place to shove that logic)
+    - `ExchangeVersion` should have the same logic - zero-value parameter gets upgraded to `CurrentProtocolVersion` transparently
 
   - why does `#list` not appear anywhere in `protocol.md`?
+
+  - `ReadError` - is there a case where a client is going to know to read an error next, or is this more something that comes up mid-stream when doing something else?
 
 ---
 
