@@ -480,8 +480,24 @@ func ReadChecksumSeed(r io.Reader) (int32, error)
 // WriteChecksumSeed writes the 4-byte LE checksum seed.
 func WriteChecksumSeed(w io.Writer, seed int32) error
 
-// ReadError reads an @ERROR: line and returns the error message.
-func ReadError(r io.Reader) (string, error)
+// ParseError checks if line is an @ERROR: response.  Returns nil if not an
+// error line, or an error with the message text otherwise.
+// Callers invoke preemptively at any protocol point where an error is possible.
+//
+// Usage:
+//
+//	line, _ := readline(r)
+//	if err := ParseError(line); err != nil {
+//	    return nil, err
+//	}
+//	// handle success path
+func ParseError(line string) error {
+    msg, ok := strings.CutPrefix(line, "@ERROR: ")
+    if !ok {
+        return nil
+    }
+    return errors.New(msg)
+}
 
 // WriteError writes an @ERROR: line.
 func WriteError(w io.Writer, msg string) error
