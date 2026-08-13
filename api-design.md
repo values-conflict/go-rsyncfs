@@ -372,7 +372,7 @@ type FlistEntry struct {
 // FlistReader reads file list entries from a byte stream.
 type FlistReader struct{}
 
-func NewFlistReader(data []byte, version int, varintFlistFlags bool) *FlistReader
+func NewFlistReader(r io.Reader, version int, varintFlistFlags bool) *FlistReader
 func (r *FlistReader) ReadEntry() (*FlistEntry, error) // returns io.EOF at end-of-list
 
 // FlistWriter writes file list entries to a writer.
