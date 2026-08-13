@@ -608,6 +608,32 @@ func PasswordAuth(password string) func(digest string, challenge []byte) ([]byte
 // Session holds an active connection to an rsync daemon, ready for FS operations.
 // In root mode, Session is a config holder (no live connection) --
 // each FS operation creates its own connection via ConnectFunc.
+//
+// Session is not safe for concurrent use.  The rsync protocol is sequential:
+// selectors are sent one-at-a-time through a single-phase loop, and the
+// compressed NDX encoder maintains shared delta state.  The mux framing layer
+// allows the daemon to interleave control messages with data, but does not
+// provide request/response correlation or concurrent transfer support.
+//
+// For concurrent access (e.g., FUSE), use one of these patterns:
+//
+// Session pool: maintain a pool of Sessions (one per Connect() call) and
+// dispatch operations across them.  Each Session handles its own sequential
+// selector loop independently.  This allows multiple file transfers to
+// proceed in parallel across connections, at the cost of handshake overhead
+// per connection.
+//
+// Cache-backed single session: use a single Session for browsing (file list
+// and directory traversal via inc_recurse), but cache transferred file data
+// locally.  When a file is opened, trigger its transfer into a temp file or
+// page cache, then serve subsequent reads from the cache.  This matches the
+// rsync pull-once model and minimizes connection churn.
+//
+// For FUSE specifically: the kernel issues requests concurrently across
+// worker threads.  Since rsync supports interleaved (but not concurrent)
+// selectors, a single Session can serve readdir A, readdir B, open A/C
+// sequentially.  However, two simultaneous file transfers will serialize.
+// A session pool with per-connection caching is the most practical approach.
 type Session struct{}
 
 var _ fs.FS = (*Session)(nil)
@@ -634,7 +660,7 @@ func (s *Session) Open(name string) (fs.File, error)
 - In root mode, `Session` holds no connection -- it delegates to `ConnectFunc` per operation.
 - `Open` on a directory reads the file list from the server and returns directory entries.
 - `Open` on a regular file sends a selector and reads the data through the delta transfer protocol.
-- `Session` is not safe for concurrent use (the connection state is shared).  Concurrent access requires separate `Connect()` calls.
+- `Session` is not safe for concurrent use (the connection state is shared).  See the Session godoc for patterns (session pool, cache-backed single session).
 
 ### Future: writability (push operations)
 

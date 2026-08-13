@@ -3,8 +3,6 @@
 
 - design questions:
 
-  - "`Session` is not safe for concurrent use" -- this stands out; is not the point of `mux` making our connections safe for concurrent use?
-
   - we should make it clear in the godoc that `WriteGreeting` will mutate the provided `Greeting` object to normalize zero-value fields -- protocol version to `CurrentProtocolVersion`, `Digests` to `SupportedDigests()`, etc (unless there is a better place to shove that logic)
     - `ExchangeVersion` should have the same logic - zero-value parameter gets upgraded to `CurrentProtocolVersion` transparently
 
