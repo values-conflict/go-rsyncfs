@@ -32,7 +32,23 @@ Both sides parse the other's greeting and negotiate down to the lower version.  
 
 #### Module selection
 
-After the greeting, the client sends a module name (text, newline-terminated).  Source: `.upstream/clientserver.c:233-320` (`start_inband_exchange()` sends module name via `io_printf()`).  The server may respond with a message-of-the-day (free-format text).
+After the greeting, the client sends a single line (text, newline-terminated) which is either a module name or a special command.  Source: `.upstream/clientserver.c:1403-1452` (`start_daemon()` reads the line via `read_line_old()`).  Before the module line, the client may send `#early_input=<len>` (see below).
+
+The server processes the line in this order (`.upstream/clientserver.c:1411-1440`):
+
+1. **`#early_input=<len>`** -- if the line starts with `#early_input=`, the server reads `len` raw bytes of binary data, then reads the actual module line again (`.upstream/clientserver.c:1411-1422`).  Used for `--early-send-file` on the client side (`.upstream/clientserver.c:268-297`).  If `len` is invalid or exceeds `BIGPATHBUFLEN`, the server sends `@ERROR: invalid early_input length` and closes.  This is an implementation detail for passing binary data before module selection; most clients never use it.
+
+2. **`#list` or empty line** -- if the line is exactly `#list` or empty (`!\*line || strcmp(line, "#list") == 0`), the server sends a module listing and closes the connection (`.upstream/clientserver.c:1424-1429`).  Listing format per module (`.upstream/clientserver.c:1265-1277`, `send_listing()`):
+   ```
+   %-15s\t%s\n
+   ```
+   where the first field is the module name (left-justified, 15 chars) and the second is the module comment, separated by a tab.  Only modules with `list = true` in rsyncd.conf are included (`.upstream/clientserver.c:1271`, `lp_list(i)`).  After the listing, if `protocol_version >= 25`, the server sends `@RSYNCD: EXIT\n` (`.upstream/clientserver.c:1276`).  For proto < 25, the server just closes the connection (no EXIT marker) and the client uses EOF as the terminator (`.upstream/clientserver.c:361`, `kluge_around_eof`).  The client reads lines until `@RSYNCD: EXIT` or EOF and then exits cleanly (`.upstream/clientserver.c:377-383`).
+
+3. **Unknown `#` command** -- if the line starts with `#` but is not `#list` or `#early_input=`, the server sends `@ERROR: Unknown command '<line>'\n` and closes (`.upstream/clientserver.c:1432-1436`).
+
+4. **Normal module name** -- the server looks up the module by name via `lp_number(line)` (`.upstream/clientserver.c:1438-1443`).  If not found, sends `@ERROR: Unknown module '<name>'\n` and closes.  On success, proceeds to authentication and argument transmission.
+
+The server may also send a message-of-the-day (free-format text) after authentication but before the arguments phase.
 
 #### Authentication (optional)
 
@@ -107,6 +123,7 @@ Arguments are passed as command-line args to the remote rsync process.  No text-
 | Greeting | `@RSYNCD: version.sub digests` (text) | None |
 | Version exchange | During greeting (parsed from text) | Binary `write_int`/`read_int` (`.upstream/compat.c:602-606`) |
 | Module selection | Yes (text) | No |
+| Module listing (`#list`) | Yes (daemon-socket-only) | No |
 | Authentication | Yes (digest-based, optional) | No (delegated to SSH/rsh) |
 | Argument format | Text (newline or null-terminated) | Command-line args |
 | `remote_protocol` initial value | Set by greeting parse | 0 (triggers binary exchange) |
@@ -834,6 +851,59 @@ varlong30(total_size)
   - **Client receiver:** `handle_stats(f_in)` -- reads stats from server (`.upstream/main.c:367-374`).  Note: the first two fields are read in opposite order (total_written, then total_read) because the meaning of read/write swaps when switching from sender to receiver.
   - **Client sender:** `handle_stats(-1)` -- does nothing when `!am_sender` and `f < 0` (`.upstream/main.c:363`).  For `write_batch`, stats are written to the batch file (`.upstream/main.c:375-383`).
 - Sent AFTER `send_files()` returns but BEFORE `read_final_goodbye()` (`.upstream/main.c:979-983`).
+
+### Module listing (`#list`) wire trace
+
+Trace for `rsync --list-only host::` (module listing, proto 32).  This is an alternative to the normal module selection -- the client sends `#list` instead of a module name.
+
+**Step 1: Greeting exchange** -- same as normal (§5 Step 1).
+
+**Step 2: Module listing request**
+
+**Direction:** Client → Daemon
+
+**Wire format:**
+```
+#list\n
+```
+
+**Process:** Client (pre-fork) → Daemon
+
+**Source:** `.upstream/clientserver.c:1424` (`strcmp(line, "#list") == 0`).
+
+**Step 3: Module listing response**
+
+**Direction:** Daemon → Client
+
+**Wire format (per module):**
+```
+%-15s\t%s\n
+```
+
+Example:
+```
+archive         Important files\n
+public          Public HTML site\n
+```
+
+**Process:** Daemon → Client
+
+**Source:** `.upstream/clientserver.c:1265-1277` (`send_listing()`).  Only modules with `list = true` in rsyncd.conf are included (`.upstream/clientserver.c:1271`, `lp_list(i)`).
+
+**Step 4: Termination**
+
+**Direction:** Daemon → Client
+
+**Wire format (proto ≥ 25):**
+```
+@RSYNCD: EXIT\n
+```
+
+**Wire format (proto < 25):** Connection closed (no terminator, client uses EOF).
+
+**Source:** `.upstream/clientserver.c:1276` (`if (protocol_version >= 25) io_printf(fd, "@RSYNCD: EXIT\n")`), `.upstream/clientserver.c:361` (`kluge_around_eof = list_only && protocol_version < 25 ? 1 : 0`).
+
+**Client behavior:** Reads lines until `@RSYNCD: EXIT` or EOF, then exits cleanly (`.upstream/clientserver.c:377-383`).
 
 ## 6. Wire protocol step-by-step (SSH/rsh transport)
 
