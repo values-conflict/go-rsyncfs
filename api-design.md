@@ -293,17 +293,53 @@ func SupportedDigests() []string
 
 ### Delta stream
 
+Two APIs: streaming (hot path during transfer) and batch (testing, batch-mode tools).  The batch functions are implemented on top of the streaming ones.
+
 ```go
+// --- Single-token streaming ---
+
+// DeltaWriter sends delta tokens one at a time.
+// The generator uses this during hash_search() to emit tokens as they are
+// discovered, avoiding buffering the entire stream.
+type DeltaWriter struct{}
+
+func NewDeltaWriter(w io.Writer) *DeltaWriter
+
+// WriteLiteral sends a literal data token (new bytes the sender doesn't have).
+func (w *DeltaWriter) WriteLiteral(data []byte) error
+
+// WriteMatch sends a match token ("reuse block N from the basis file").
+func (w *DeltaWriter) WriteMatch(blockIdx int32) error
+
+// WriteEnd sends the end-of-stream marker.
+func (w *DeltaWriter) WriteEnd() error
+
+// DeltaReader consumes delta tokens one at a time.
+// The receiver uses this to reconstruct the file without buffering the
+// full token list.
+type DeltaReader struct{}
+
+func NewDeltaReader(r io.Reader) *DeltaReader
+
+// ReadToken returns the next token.  If data is non-nil it's a literal
+// (len(data) > 0); if data is nil and blockIdx >= 0 it's a match reference;
+// if isEnd is true the stream is complete.
+func (r *DeltaReader) ReadToken() (data []byte, blockIdx int32, isEnd bool, err error)
+
+// --- Batch API (convenience) ---
+
 // DeltaToken represents a single command in the delta stream.
 type DeltaToken struct {
     Literal []byte      // non-nil for literal data
     BlockIdx int32      // valid when Literal is nil (token reference)
 }
 
-// ParseDeltaStream reads delta tokens from r until the end marker (int32 0).
+// ParseDeltaStream reads all delta tokens from r until the end marker.
+// Convenience wrapper around DeltaReader -- loads full stream into memory.
 func ParseDeltaStream(r io.Reader) ([]DeltaToken, error)
 
 // WriteDeltaStream writes delta tokens to w.
+// Convenience wrapper around DeltaWriter.
 func WriteDeltaStream(w io.Writer, tokens []DeltaToken) error
 ```
 

@@ -3,8 +3,6 @@
 
 - design questions:
 
-  - `ParseDeltaStream` returns a slice of `DeltaToken` objects and `WriteDeltaStream` takes one -- is the processing of those on either side sufficiently divorced from the protocol that they do not have to have the full slice in memory and could return/take an iterator?  is the number of `DeltaToken`s we process at once typically so small that this does not matter and I am just overengineering?
-
   - "`Session` is not safe for concurrent use" -- this stands out; is not the point of `mux` making our connections safe for concurrent use?
 
   - why does `NewFlistReader` take `[]byte` but `NewFlistWriter` takes `io.Writer`?  should the former take `io.Reader`?  does this get called in such a way that we were forced to pre-read the bytes off the wire?
