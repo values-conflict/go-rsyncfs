@@ -125,6 +125,10 @@ type Greeting struct {
 func ParseGreeting(line string) (*Greeting, error)
 func (g *Greeting) String() string // "@RSYNCD: V.S d1 d2\n"
 
+// ApplyDefaults fills zero-value fields: Version -> CurrentProtocolVersion,
+// SubProtocol -> 0, Digests -> SupportedDigests().  Idempotent.
+func (g *Greeting) ApplyDefaults()
+
 // Negotiate picks the best common version and digest between two greetings.
 // Client's greeting must be first argument (digest negotiation follows
 // client preference).  Returns negotiated version, subprotocol, and digest.
@@ -434,7 +438,7 @@ These are building blocks for the full handshake.  The root `rsyncfs/` package c
 func ReadGreeting(r io.Reader) (*Greeting, error)
 
 // WriteGreeting writes a greeting line to w.
-func WriteGreeting(w io.Writer, g *Greeting) error
+func WriteGreeting(w io.Writer, g Greeting) error
 
 // ReadModuleRequest reads the module name (#list or actual module).
 func ReadModuleRequest(r io.Reader) (string, error)
@@ -691,25 +695,26 @@ type ServerModule struct {
 The root `rsyncfs/` package composes `protocol/` primitives into the full handshake.  Here is the composition for `Server.HandleConnection`:
 
 ```
-1. protocol.WriteGreeting(rw, localGreeting)
-2. protocol.ReadGreeting(rw)  -> clientGreeting
-3. protocol.Negotiate(clientGreeting, localGreeting) -> version, subProto, digest
-4. protocol.ReadModuleRequest(rw) -> moduleName (#list or actual)
+1. localGreeting.ApplyDefaults()
+2. protocol.WriteGreeting(rw, localGreeting)
+3. protocol.ReadGreeting(rw)  -> clientGreeting
+4. protocol.Negotiate(clientGreeting, localGreeting) -> version, subProto, digest
+5. protocol.ReadModuleRequest(rw) -> moduleName (#list or actual)
    if #list: protocol.WriteModuleList(rw, modules); return
-5. if auth required: protocol.WriteAuthChallenge(rw, challenge)
+6. if auth required: protocol.WriteAuthChallenge(rw, challenge)
                      protocol.ReadAuthResponse(rw) -> username, responseHash
                      verify via AuthCallback
                      protocol.WriteAuthOK(rw)
    else: protocol.WriteAuthOK(rw)
-6. protocol.ReadArgs(rw, version) -> args
-7. if version >= 30: clientInfo = protocol.ExtractClientInfo(args)
+7. protocol.ReadArgs(rw, version) -> args
+8. if version >= 30: clientInfo = protocol.ExtractClientInfo(args)
                      compatFlags = protocol.ResolveCompatFlags(caps, clientInfo)
                      protocol.WriteCompatFlags(rw, compatFlags, version)
-8. if CF_VARINT_FLIST_FLAGS: protocol.NegotiateStrings(rw, checksums, true)
-9. protocol.WriteChecksumSeed(rw, seed)
-10. <- switch to multiplexed I/O for daemon->client channel
-11. sendFileList(muxWriter, module.FS, ".", version, varintFlags)
-12. <- phase exchange + selector loop
+9. if CF_VARINT_FLIST_FLAGS: protocol.NegotiateStrings(rw, checksums, true)
+10. protocol.WriteChecksumSeed(rw, seed)
+11. <- switch to multiplexed I/O for daemon->client channel
+12. sendFileList(muxWriter, module.FS, ".", version, varintFlags)
+13. <- phase exchange + selector loop
     for each phase:
         read selectors from raw connection (buffered)
         for each selector with ItemTransfer:
@@ -717,26 +722,27 @@ The root `rsyncfs/` package composes `protocol/` primitives into the full handsh
             sendFile(muxReader, muxWriter, file, version, seed)
         read NDX_DONE from raw connection
         echo NDX_DONE via muxWriter
-13. <- final goodbye exchange
-14. <- stats exchange
+14. <- final goodbye exchange
+15. <- stats exchange
 ```
 
 And for `Client.Connect` + `Session.Open`:
 
 ```
 Connect():
-1. protocol.WriteGreeting(rw, clientGreeting)
-2. protocol.ReadGreeting(rw)  -> serverGreeting
-3. protocol.Negotiate(clientGreeting, serverGreeting) -> version, subProto, digest
-4. send module name as text line
-5. read server response: AUTHREQD, OK, or ERROR
-6. if AUTHREQD: compute auth response, protocol.WriteAuthResponse(rw, user, hash)
-7. protocol.WriteArgs(rw, args, version)  -- --server --sender flags . e0v
-8. if version >= 30: protocol.ReadCompatFlags(rw, version) -> compatFlags
-9. if CF_VARINT_FLIST_FLAGS: protocol.NegotiateStrings(rw, checksums, true)
-10. protocol.ReadChecksumSeed(rw) -> seed
-11. <- switch to multiplexed I/O for daemon->client channel
-12. return Session
+1. clientGreeting.ApplyDefaults()
+2. protocol.WriteGreeting(rw, clientGreeting)
+3. protocol.ReadGreeting(rw)  -> serverGreeting
+4. protocol.Negotiate(clientGreeting, serverGreeting) -> version, subProto, digest
+5. send module name as text line
+6. read server response: AUTHREQD, OK, or ERROR
+7. if AUTHREQD: compute auth response, protocol.WriteAuthResponse(rw, user, hash)
+8. protocol.WriteArgs(rw, args, version)  -- --server --sender flags . e0v
+9. if version >= 30: protocol.ReadCompatFlags(rw, version) -> compatFlags
+10. if CF_VARINT_FLIST_FLAGS: protocol.NegotiateStrings(rw, checksums, true)
+11. protocol.ReadChecksumSeed(rw) -> seed
+12. <- switch to multiplexed I/O for daemon->client channel
+13. return Session
 
 Session.Open(name):
 1. readFileList() -- read from muxReader, parse with protocol.FlistReader

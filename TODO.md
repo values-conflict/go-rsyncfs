@@ -1,13 +1,6 @@
 <!-- remove from file when complete; keep a double space between TODO entries so they're more readable / digestible -->
 <!-- sub-bullets (2-space indent, `-`, cuddled -- no blank line between parent and sub-bullets, nor between sibling sub-bullets) are for related side notes subordinate to the main item but distinct enough to stand alone -- use a semicolon continuation for the same thought, a sub-bullet for a related angle, and a new top-level entry for a separate concern -->
 
-- design questions:
-
-  - we should make it clear in the godoc that `WriteGreeting` will mutate the provided `Greeting` object to normalize zero-value fields -- protocol version to `CurrentProtocolVersion`, `Digests` to `SupportedDigests()`, etc (unless there is a better place to shove that logic)
-    - `ExchangeVersion` should have the same logic - zero-value parameter gets upgraded to `CurrentProtocolVersion` transparently
-
----
-
 - upstream rsync interop: real `rsync` client fails with "connection unexpectedly closed" when connecting to our server
   - resolved issues:
     - `extractClientInfo` was looking for standalone `-e` argument, but upstream embeds `e` flags in combined short-options
