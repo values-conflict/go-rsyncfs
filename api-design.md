@@ -524,7 +524,11 @@ The main API of the library.  It builds on `protocol/` for all wire details and 
 ```go
 // Server represents an rsync daemon that serves one or more modules.
 // Construct with NewServer.  A single Server handles multiple connections.
-type Server struct{}
+type Server struct {
+    // Greeting is the greeting the server advertises on every connection.
+    // Zero-value fields use defaults (version 32, digests ["md5", "md4"]).
+    Greeting protocol.Greeting
+}
 
 func NewServer(mods ...*ServerModule) (*Server, error)
 
@@ -534,17 +538,11 @@ type ServerModule struct {
     Comment  string  // displayed in #list
     FS       fs.FS   // backing filesystem
     ReadOnly bool    // true = reject push operations
-}
 
-// HandleOptions configures a single connection handled by the server.
-type HandleOptions struct {
-    // LocalGreeting is the greeting the server advertises.
-    // Zero-value fields use defaults (version 32, digests ["md5", "md4"]).
-    LocalGreeting protocol.Greeting
-
-    // AuthCallback verifies a username+challenge response.
+    // AuthCallback verifies a username+challenge response for this module.
     // Returns the expected raw digest bytes, or an error to reject.
-    // Nil means no authentication required.
+    // Nil means no authentication required for this module.
+    // Matches rsync's per-module secrets file model.
     AuthCallback func(username string, challenge []byte) ([]byte, error)
 }
 
@@ -555,14 +553,14 @@ type HandleOptions struct {
 // Handles: greeting exchange, module selection (#list or named module),
 // authentication, argument parsing, compat flags, checksum negotiation,
 // file list transfer, selector loop, data transfer, final goodbye.
-func (s *Server) HandleConnection(rw io.ReadWriter, opts HandleOptions) error
+func (s *Server) HandleConnection(rw io.ReadWriter) error
 ```
 
 **Design notes for Server:**
 
-- The server handles the daemon socket protocol exclusively.  SSH/rsh transport is the caller's responsibility (they invoke the rsync binary remotely and pipe stdin/stdout).
+- The server implements the daemon socket protocol exclusively.  SSH/rsh transport uses a different protocol flow (no greeting, no module selection, no auth, no argument transmission, binary version exchange instead) and is not supported.  If SSH/rsh support is needed, it would require a separate API.
 - `HandleConnection` is the single entry point -- one call per connection.  The Server itself is stateless and reusable.
-- Auth is callback-based: the caller provides the verification logic (secrets file parsing, etc).
+- Auth is per-module (via `ServerModule.AuthCallback`), matching rsync's per-module secrets file model.
 - The server reads selectors from the raw connection (buffered I/O) and writes data through the mux layer.  This I/O mode split is internal to `HandleConnection`.
 
 ### Client
@@ -695,16 +693,16 @@ type ServerModule struct {
 The root `rsyncfs/` package composes `protocol/` primitives into the full handshake.  Here is the composition for `Server.HandleConnection`:
 
 ```
-1. localGreeting.ApplyDefaults()
-2. protocol.WriteGreeting(rw, localGreeting)
+1. s.Greeting.ApplyDefaults()
+2. protocol.WriteGreeting(rw, s.Greeting)
 3. protocol.ReadGreeting(rw)  -> clientGreeting
-4. protocol.Negotiate(clientGreeting, localGreeting) -> version, subProto, digest
+4. protocol.Negotiate(clientGreeting, s.Greeting) -> version, subProto, digest
 5. protocol.ReadModuleRequest(rw) -> moduleName (#list or actual)
    if #list: protocol.WriteModuleList(rw, modules); return
-6. if auth required: protocol.WriteAuthChallenge(rw, challenge)
-                     protocol.ReadAuthResponse(rw) -> username, responseHash
-                     verify via AuthCallback
-                     protocol.WriteAuthOK(rw)
+6. if module.AuthCallback != nil: protocol.WriteAuthChallenge(rw, challenge)
+                                  protocol.ReadAuthResponse(rw) -> username, responseHash
+                                  verify via module.AuthCallback
+                                  protocol.WriteAuthOK(rw)
    else: protocol.WriteAuthOK(rw)
 7. protocol.ReadArgs(rw, version) -> args
 8. if version >= 30: clientInfo = protocol.ExtractClientInfo(args)
