@@ -491,14 +491,42 @@ func ReadCompatFlags(r io.Reader, version int) (int, error)
 // No-op for proto < 30.
 func WriteCompatFlags(w io.Writer, flags int, version int) error
 
-// NegotiateStrings handles the checksum/compression vstring exchange.
-// Only exchanges data when doNegotiatedStrings is true (CF_VARINT_FLIST_FLAGS set).
-// Each side picks its own most-preferred algorithm that also appears in the
-// peer's list (not the client's first acceptable choice).  When both sides
-// emit their list in table (strongest-first) order, they converge on the
-// strongest mutual choice; a peer that front-loads a weaker name only
-// desyncs itself.
-func NegotiateStrings(rw io.ReadWriter, myAlgos []string, doNegotiatedStrings bool) (string, error)
+// Algorithms holds the negotiated result for both algorithm categories.
+type Algorithms struct {
+    Checksum string // e.g. "md5"
+    Compress string // e.g. "zlib" (empty if compression not negotiated)
+}
+
+// DefaultAlgorithms returns the default algorithms for the given protocol
+// version without any wire exchange.  Checksum is "md5" (proto >= 30) or "md4"
+// (proto < 30); compression is always "zlib".  No data is sent or received.
+// Use this when CF_VARINT_FLIST_FLAGS is not set.
+//
+// Use together with NegotiateAlgorithms to handle both negotiated and
+// non-negotiated paths:
+//
+//	var algos protocol.Algorithms
+//	if compatFlags&protocol.CompatVarintFlistFlags != 0 {
+//	    algos, err = protocol.NegotiateAlgorithms(rw, myChecksums, myCompressions)
+//	} else {
+//	    algos = protocol.DefaultAlgorithms(version)
+//	}
+func DefaultAlgorithms(version int) Algorithms
+
+// NegotiateAlgorithms performs the full vstring exchange for both checksums
+// and compression in a single call.  Both sides send their lists before
+// reading the peer's lists to avoid deadlock.  Each side picks its own
+// most-preferred algorithm that also appears in the peer's list (not the
+// client's first acceptable choice).  When both sides emit their list in
+// table (strongest-first) order, they converge on the strongest mutual
+// choice; a peer that front-loads a weaker name only desyncs itself.
+//
+// myChecksums is always required.  myCompressions is only used when
+// compression is enabled; pass nil to skip compression negotiation.
+//
+// This function is only called when CF_VARINT_FLIST_FLAGS is set.  When the
+// flag is not set, use DefaultAlgorithms instead (no wire data exchanged).
+func NegotiateAlgorithms(rw io.ReadWriter, myChecksums []string, myCompressions []string) (Algorithms, error)
 
 // ReadChecksumSeed reads the 4-byte LE checksum seed.
 func ReadChecksumSeed(r io.Reader) (int32, error)
@@ -732,7 +760,8 @@ The root `rsyncfs/` package composes `protocol/` primitives into the full handsh
 8. if version >= 30: clientInfo = protocol.ExtractClientInfo(args)
                      compatFlags = protocol.ResolveCompatFlags(caps, clientInfo)
                      protocol.WriteCompatFlags(rw, compatFlags, version)
-9. if CF_VARINT_FLIST_FLAGS: protocol.NegotiateStrings(rw, checksums, true)
+9. if CF_VARINT_FLIST_FLAGS: protocol.NegotiateAlgorithms(rw, checksums, compressions)
+   else: protocol.DefaultAlgorithms(version)
 10. protocol.WriteChecksumSeed(rw, seed)
 11. <- switch to multiplexed I/O for daemon->client channel
 12. sendFileList(muxWriter, module.FS, ".", version, varintFlags)
@@ -761,7 +790,8 @@ Connect():
 7. if AUTHREQD: compute auth response, protocol.WriteAuthResponse(rw, user, hash)
 8. protocol.WriteArgs(rw, args, version)  -- --server --sender flags . e0v
 9. if version >= 30: protocol.ReadCompatFlags(rw, version) -> compatFlags
-10. if CF_VARINT_FLIST_FLAGS: protocol.NegotiateStrings(rw, checksums, true)
+10. if CF_VARINT_FLIST_FLAGS: protocol.NegotiateAlgorithms(rw, checksums, compressions)
+    else: protocol.DefaultAlgorithms(version)
 11. protocol.ReadChecksumSeed(rw) -> seed
 12. <- switch to multiplexed I/O for daemon->client channel
 13. return Session
