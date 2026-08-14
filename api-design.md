@@ -204,6 +204,23 @@ const (
     CompatVarintFlistFlags  = 1 << 7 // 'v' -- varint xmit flags
     CompatId0Names          = 1 << 8 // 'u' -- send id0 names
 )
+
+### IO error constants
+
+Bitmask values carried in `MSG_IO_ERROR`.  Peer-supplied values must be
+masked with `IOERRValidMask` before use (rsync 3.5.0+).
+
+```go
+const (
+    IOERRGeneral   = 1 << 0 // general I/O error
+    IOERRVanished  = 1 << 1 // file vanished during transfer
+    IOERRDelLimit  = 1 << 2 // delete limit reached
+
+    // Mask of all defined IOERR_* bits.  Sanitize peer-supplied
+    // MSG_IO_ERROR payloads against this to prevent a malicious peer
+    // from setting arbitrary undefined bits in the local io_error.
+    IOERRValidMask = IOERRGeneral | IOERRVanished | IOERRDelLimit
+)
 ```
 
 ### Xmit flag constants
@@ -476,6 +493,11 @@ func WriteCompatFlags(w io.Writer, flags int, version int) error
 
 // NegotiateStrings handles the checksum/compression vstring exchange.
 // Only exchanges data when doNegotiatedStrings is true (CF_VARINT_FLIST_FLAGS set).
+// Each side picks its own most-preferred algorithm that also appears in the
+// peer's list (not the client's first acceptable choice).  When both sides
+// emit their list in table (strongest-first) order, they converge on the
+// strongest mutual choice; a peer that front-loads a weaker name only
+// desyncs itself.
 func NegotiateStrings(rw io.ReadWriter, myAlgos []string, doNegotiatedStrings bool) (string, error)
 
 // ReadChecksumSeed reads the 4-byte LE checksum seed.
@@ -562,6 +584,8 @@ func (s *Server) HandleConnection(rw io.ReadWriter) error
 - `HandleConnection` is the single entry point -- one call per connection.  The Server itself is stateless and reusable.
 - Auth is per-module (via `ServerModule.AuthCallback`), matching rsync's per-module secrets file model.
 - The server reads selectors from the raw connection (buffered I/O) and writes data through the mux layer.  This I/O mode split is internal to `HandleConnection`.
+- The server enforces a handshake timeout (default 60 seconds) on the pre-transfer handshake (greeting, module selection, auth, argument reading).  This prevents an unauthenticated peer from holding a connection slot open indefinitely.  The timeout is internal and not currently configurable.
+- Peer-supplied `MSG_IO_ERROR` values are masked against `IOERRValidMask` before use, preventing a malicious peer from setting arbitrary undefined bits in the local `io_error`.
 
 ### Client
 
