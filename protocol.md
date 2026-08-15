@@ -16,37 +16,37 @@ The daemon socket transport uses a text-based greeting exchange followed by modu
 
 #### Greeting exchange
 
-Both sides send a greeting simultaneously (simultaneous write, then read).  Source: `.upstream/compat.c:844` (client sends via `io_printf(f_out, "@RSYNCD: %d.%d %s\n", ...)`), `.upstream/clientserver.c:209` (server parses via `sscanf(buf, "@RSYNCD: %d.%d", ...)`).
+Both sides send a greeting simultaneously (simultaneous write, then read).  Source: `.upstream/compat.c:853` (client sends via `io_printf(f_out, "@RSYNCD: %d.%d %s\n", ...)` inside `output_daemon_greeting()`, `.upstream/compat.c:844`), `.upstream/clientserver.c:209` (server parses via `sscanf(buf, "@RSYNCD: %d.%d", ...)`).
 
 ```
 @RSYNCD: <version>.<sub> <digest1> <digest2> ...
 ```
 
 - `<version>` is the protocol version number (eg, 32).
-- `<sub>` is the subprotocol version (0 for final releases, nonzero for pre-releases).  Source: `.upstream/compat.c:888-893` (`get_subprotocol_version()`).
-- The digest list is space-separated.  Modern rsync always includes it in the greeting (`.upstream/compat.c:851-853`, `output_daemon_greeting()` calls `get_default_nno_list()`).  If omitted on protocol 32+, it is a fatal error (`.upstream/clientserver.c:218-223`).  If omitted on protocol 30-31, the receiver assumes `md5`; on protocol < 30, it assumes `md4` (`.upstream/clientserver.c:211-217`).
+- `<sub>` is the subprotocol version (0 for final releases, nonzero for pre-releases).  Source: `.upstream/compat.c:896-903` (`get_subprotocol_version()`).
+- The digest list is space-separated.  Modern rsync always includes it in the greeting (`.upstream/compat.c:851-853`, `output_daemon_greeting()` calls `get_default_nno_list()`).  If omitted on protocol 32+, it is a fatal error (`.upstream/clientserver.c:234-240`, gate `remote_protocol > 31`).  If omitted on protocol 30-31, the receiver assumes `md5`; on protocol < 30, it assumes `md4` (`daemon_auth_choices` stays unset, `.upstream/clientserver.c:228-233`; the default algorithm comes from `.upstream/compat.c:555-556`).
 
-Both sides parse the other's greeting and negotiate down to the lower version.  Subprotocol mismatch causes a version downgrade.  Source: `.upstream/clientserver.c:224-240`.
+Both sides parse the other's greeting and negotiate down to the lower version.  Subprotocol mismatch causes a version downgrade.  Source: `.upstream/clientserver.c:242-253`.
 
 `remote_protocol` is set during this greeting exchange (via `sscanf`), so it is nonzero after the exchange.
 
 #### Module selection
 
-After the greeting, the client sends a single line (text, newline-terminated) which is either a module name or a special command.  Source: `.upstream/clientserver.c:1538-1587` (`start_daemon()` reads the line via `read_line_old()`).  Before the module line, the client may send `#early_input=<len>` (see below).
+After the greeting, the client sends a single line (text, newline-terminated) which is either a module name or a special command.  Source: `.upstream/clientserver.c:1414` (`start_daemon()`), `.upstream/clientserver.c:1538` (reads the line via `read_line_old()`).  Before the module line, the client may send `#early_input=<len>` (see below).
 
-The server processes the line in this order (`.upstream/clientserver.c:1546-1575`):
+The server processes the line in this order (`.upstream/clientserver.c:1541-1572`):
 
-1. **`#early_input=<len>`** -- if the line starts with `#early_input=`, the server reads `len` raw bytes of binary data, then reads the actual module line again (`.upstream/clientserver.c:1546-1557`).  Used for `--early-send-file` on the client side (`.upstream/clientserver.c:294-323`).  If `len` is invalid or exceeds `BIGPATHBUFLEN`, the server sends `@ERROR: invalid early_input length` and closes.  This is an implementation detail for passing binary data before module selection; most clients never use it.
+1. **`#early_input=<len>`** -- if the line starts with `#early_input=`, the server reads `len` raw bytes of binary data, then reads the actual module line again (`.upstream/clientserver.c:1541-1552`).  Used for `--early-input` on the client side (`.upstream/options.c:855`, sending code at `.upstream/clientserver.c:299-338`).  If `len` is invalid or exceeds `BIGPATHBUFLEN`, the server sends `@ERROR: invalid early_input length` and closes.  This is an implementation detail for passing binary data before module selection; most clients never use it.
 
-2. **`#list` or empty line** -- if the line is exactly `#list` or empty (`!\*line || strcmp(line, "#list") == 0`), the server sends a module listing and closes the connection (`.upstream/clientserver.c:1559-1564`).  Listing format per module (`.upstream/clientserver.c:1374-1386`, `send_listing()`):
+2. **`#list` or empty line** -- if the line is exactly `#list` or empty (`!\*line || strcmp(line, "#list") == 0`), the server sends a module listing and closes the connection (`.upstream/clientserver.c:1554-1559`).  Listing format per module (`.upstream/clientserver.c:1374-1386`, `send_listing()`):
    ```
    %-15s\t%s\n
    ```
-   where the first field is the module name (left-justified, 15 chars) and the second is the module comment, separated by a tab.  Only modules with `list = true` in rsyncd.conf are included (`.upstream/clientserver.c:1380`, `lp_list(i)`).  After the listing, if `protocol_version >= 25`, the server sends `@RSYNCD: EXIT\n` (`.upstream/clientserver.c:1385`).  For proto < 25, the server just closes the connection (no EXIT marker) and the client uses EOF as the terminator (`.upstream/clientserver.c:399`, `kluge_around_eof`).  The client reads lines until `@RSYNCD: EXIT` or EOF and then exits cleanly (`.upstream/clientserver.c:426-432`).
+   where the first field is the module name (left-justified, 15 chars) and the second is the module comment, separated by a tab.  Only modules with `list = true` in rsyncd.conf are included (`.upstream/clientserver.c:1380`, `lp_list(i)`).  After the listing, if `protocol_version >= 25`, the server sends `@RSYNCD: EXIT\n` (`.upstream/clientserver.c:1385`).  For proto < 25, the server just closes the connection (no EXIT marker) and the client uses EOF as the terminator (`.upstream/clientserver.c:399`, `kluge_around_eof`).  The client reads lines until `@RSYNCD: EXIT` or EOF and then exits cleanly (`.upstream/clientserver.c:401-437`, EXIT handling at `.upstream/clientserver.c:416-421`).
 
-3. **Unknown `#` command** -- if the line starts with `#` but is not `#list` or `#early_input=`, the server sends `@ERROR: Unknown command '<line>'\n` and closes (`.upstream/clientserver.c:1566-1570`).
+3. **Unknown `#` command** -- if the line starts with `#` but is not `#list` or `#early_input=`, the server sends `@ERROR: Unknown command '<line>'\n` and closes (`.upstream/clientserver.c:1561-1565`).
 
-4. **Normal module name** -- the server looks up the module by name via `lp_number(line)` (`.upstream/clientserver.c:1572-1577`).  If not found, sends `@ERROR: Unknown module '<name>'\n` and closes.  On success, proceeds to authentication and argument transmission.
+4. **Normal module name** -- the server looks up the module by name via `lp_number(line)` (`.upstream/clientserver.c:1567-1572`).  If not found, sends `@ERROR: Unknown module '<name>'\n` and closes.  On success, proceeds to authentication and argument transmission.
 
 The server may also send a message-of-the-day (free-format text) after authentication but before the arguments phase.
 
@@ -70,11 +70,11 @@ The server responds:
 @RSYNCD: OK
 ```
 
-Source: `.upstream/clientserver.c:408-416` (auth challenge/response), `.upstream/clientserver.c:809` (`auth_server()` sends challenge).
+Source: `.upstream/clientserver.c:408-414` (auth challenge/response), `.upstream/clientserver.c:809` (`auth_server()` sends challenge).
 
 #### Argument transmission
 
-After authentication, the client sends rsync command-line arguments.  Source: `.upstream/clientserver.c:263-350` (`start_inband_exchange()`), `.upstream/clientserver.c:1154` (`read_args()`).
+After authentication, the client sends rsync command-line arguments.  Source: `.upstream/clientserver.c:263-464` (`start_inband_exchange()`; args sent at `.upstream/clientserver.c:439-451`), `.upstream/io.c:1454-1525` (`read_args()`, invoked at `.upstream/clientserver.c:1154`).
 
 - **Protocol ≥ 30:** Null-terminated (`.upstream/clientserver.c:258`, `rl_nulls = 1`).
 - **Protocol < 30:** Newline-terminated.
@@ -85,7 +85,7 @@ The `e` flag argument contains `client_info` feature flags (letters like `i`, `L
 
 #### Binary version exchange is skipped
 
-The binary version exchange at `.upstream/compat.c:598-608` is **skipped** for daemon connections because `remote_protocol` is already set during the greeting exchange.  The guard `if (remote_protocol == 0)` at `.upstream/compat.c:598` is false for daemon connections.
+The binary version exchange at `.upstream/compat.c:602-609` is **skipped** for daemon connections because `remote_protocol` is already set during the greeting exchange.  The guard `if (remote_protocol == 0)` at `.upstream/compat.c:602` is false for daemon connections.
 
 ### 1.2 SSH/rsh transport
 
@@ -93,7 +93,7 @@ No greeting exchange -- the rsync binary is invoked remotely via shell.  Binary 
 
 #### Binary version exchange
 
-Source: `.upstream/compat.c:598-608`.
+Source: `.upstream/compat.c:602-609`.
 
 ```c
 if (remote_protocol == 0) {
@@ -107,9 +107,9 @@ if (remote_protocol == 0) {
 }
 ```
 
-- Sends `protocol_version` as 4-byte LE int via `write_int()` (`.upstream/compat.c:602`).
-- Reads `remote_protocol` as 4-byte LE int via `read_int()` (`.upstream/compat.c:603`).
-- Negotiates down to the lower version (`.upstream/compat.c:604-605`).
+- Sends `protocol_version` as 4-byte LE int via `write_int()` (`.upstream/compat.c:606`).
+- Reads `remote_protocol` as 4-byte LE int via `read_int()` (`.upstream/compat.c:607`).
+- Negotiates down to the lower version (`.upstream/compat.c:608-609`).
 - This exchange **only** happens when `remote_protocol == 0` (the initial value for SSH/rsh connections, `.upstream/compat.c:75`).
 
 #### No module selection or authentication
@@ -121,7 +121,7 @@ Arguments are passed as command-line args to the remote rsync process.  No text-
 | Aspect | Daemon socket | SSH/rsh |
 |--------|---------------|---------|
 | Greeting | `@RSYNCD: version.sub digests` (text) | None |
-| Version exchange | During greeting (parsed from text) | Binary `write_int`/`read_int` (`.upstream/compat.c:600-604`) |
+| Version exchange | During greeting (parsed from text) | Binary `write_int`/`read_int` (`.upstream/compat.c:606-607`) |
 | Module selection | Yes (text) | No |
 | Module listing (`#list`) | Yes (daemon-socket-only) | No |
 | Authentication | Yes (digest-based, optional) | No (delegated to SSH/rsh) |
@@ -161,13 +161,13 @@ File list and argument handling changes.  Source: `.upstream/clientserver.c:456-
 
 Major change: the multiplexed I/O layer was introduced, allowing MSG_DATA frames to be mixed with control messages (MSG_SUCCESS, MSG_ERROR, etc).  This is the version where `io_start_multiplex_in/out` gates appear.
 
-Source: `.upstream/main.c:1293` (`if (protocol_version >= 23) io_start_multiplex_out(f_out)`), `.upstream/main.c:1399` (`if (protocol_version >= 23) io_start_multiplex_in(f_in)`), `.upstream/main.c:1399` (`if (protocol_version >= 23) io_start_multiplex_in(f_in)`).
+Source: `.upstream/main.c:1293` (`if (protocol_version >= 23) io_start_multiplex_out(f_out)`), `.upstream/main.c:1399` (`if (protocol_version >= 23) io_start_multiplex_in(f_in)`).
 
 Before protocol 23, all I/O was buffered (raw bytes).  From protocol 23 onward, the daemon→client channel (file data) uses multiplexed I/O.
 
 #### Protocol 24 -- final goodbye message
 
-Added the final goodbye message exchange.  Source: `.upstream/main.c:1151` (`if (protocol_version >= 24) write_ndx(f_out, NDX_DONE)`), `.upstream/main.c:1000` (`if (protocol_version >= 24) read_final_goodbye(f_in, f_out)`), `.upstream/main.c:1385` (`if (protocol_version >= 24) read_final_goodbye(f_in, f_out)`).
+Added the final goodbye message exchange.  Source: `.upstream/main.c:1154-1157` (`if (protocol_version >= 24) write_ndx(f_out, NDX_DONE)`), `.upstream/main.c:996-997` (`if (protocol_version >= 24) read_final_goodbye(f_in, f_out)`), `.upstream/main.c:1384-1385` (`if (protocol_version >= 24) read_final_goodbye(f_in, f_out)`).
 
 #### Protocol 25 (rsync 2.5.0, 2001)
 
@@ -175,7 +175,7 @@ Added the final goodbye message exchange.  Source: `.upstream/main.c:1151` (`if 
 
 #### Protocol 26 (rsync 2.4.6pre1)
 
-Device number encoding changes.  Source: `.upstream/flist.c:1346` (`if (protocol_version < 26)` -- 32-bit dev_t/ino_t for proto < 26, 64-bit for proto ≥ 26), `.upstream/flist.c:2773` (same gate on receive side).
+Device number encoding changes.  Source: `.upstream/flist.c:744` (send side), `.upstream/flist.c:1346` (receive side; `if (protocol_version < 26)` -- 32-bit dev_t/ino_t for proto < 26, 64-bit for proto ≥ 26).
 
 #### Protocol 27 (rsync 2.6.0, 2004)
 
@@ -195,24 +195,24 @@ Key changes:
 
 #### Protocol 29 (rsync 2.6.4, 2005)
 
-Major protocol restructuring: phase exchange changes, iflags in selectors, keep-alive, filter rule improvements.  Source: `.upstream/compat.c:690` (feature requirement gates), `.upstream/sender.c:520` (`max_phase = protocol_version >= 29 ? 2 : 1`), `.upstream/receiver.c:834` (same gate).
+Major protocol restructuring: phase exchange changes, iflags in selectors, keep-alive, filter rule improvements.  Source: `.upstream/compat.c:690` (feature requirement gates), `.upstream/sender.c:498` (`max_phase = protocol_version >= 29 ? 2 : 1`), `.upstream/receiver.c:809` (same gate).
 
 Key changes:
-- Phase exchange: `max_phase = 2` (was 1).  The sender and receiver now have a two-phase handshaking protocol.  Source: `.upstream/sender.c:520`, `.upstream/receiver.c:834`.
-- Item flags (iflags): selectors include a 2-byte LE iflags field sent via `write_shortint()`.  Source: `.upstream/rsync.c:394` (`iflags = protocol_version >= 29 ? read_shortint(f_in) : ITEM_TRANSFER | ITEM_MISSING_DATA`), `.upstream/generator.c:2820` (`if (protocol_version >= 29)` sends iflags).
+- Phase exchange: `max_phase = 2` (was 1).  The sender and receiver now have a two-phase handshaking protocol.  Source: `.upstream/sender.c:498`, `.upstream/receiver.c:809`.
+- Item flags (iflags): selectors include a 2-byte LE iflags field sent via `write_shortint()`.  Source: `.upstream/rsync.c:384-385` (`iflags = protocol_version >= 29 ? read_shortint(f_in) : ITEM_TRANSFER | ITEM_MISSING_DATA`), `.upstream/generator.c:588-597` (`itemize()`, `if (protocol_version >= 29)` sends iflags via `write_shortint()`).
 - For proto < 29, iflags defaults to `ITEM_TRANSFER | ITEM_MISSING_DATA` (both set).
-- Keep-alive: the sender can send keep-alive messages via `maybe_send_keepalive()` (`.upstream/io.c:1723`).  Modern rsync sends an empty `MSG_DATA` frame as keep-alive.  Older rsync versions used `MSG_NOOP` for proto 30 (`.upstream/io.c:1716`, comment).  The proto < 31 vs ≥ 31 distinction affects the files-from forwarding path (`.upstream/io.c:1723`, `start_filesfrom_forwarding()`), not the keep-alive itself.
+- Keep-alive: the sender can send keep-alive messages via `maybe_send_keepalive()` (`.upstream/io.c:1613`).  Modern rsync sends an empty `MSG_DATA` frame as keep-alive.  Older rsync versions used `MSG_NOOP` for proto 30 (`.upstream/io.c:1732-1733`, comment).  The proto < 31 vs ≥ 31 distinction affects the files-from forwarding path (`.upstream/io.c:1372-1374`, `start_filesfrom_forwarding()`), not the keep-alive itself.
 - Filter rules: full filter-rule support with delete modes.  Source: `.upstream/exclude.c:1947`, `.upstream/exclude.c:1976`.
 - Delete phases: `delete_before`, `delete_during`, `delete_after` support.  Source: `.upstream/compat.c:684-688`.
 - Features requiring proto ≥ 29: `--fuzzy`, `--inplace` with `--link-dest`, multiple `--link-dest`, `--prune-empty-dirs`.  Source: `.upstream/compat.c:691-719`.
 
 #### Protocol 30 (rsync 3.0.0, 2008)
 
-Major overhaul: compressed NDX, varint xmit flags, compat flags exchange, subprotocol version, null-terminated args, MD5 checksums.  Source: `.upstream/compat.c:722` (`} else if (protocol_version >= 30) {`), `.upstream/io.c:2510` (`if (protocol_version < 30 || read_batch)`), `.upstream/io.c:2558` (`if (protocol_version < 30)`).
+Major overhaul: compressed NDX, varint xmit flags, compat flags exchange, subprotocol version, null-terminated args, MD5 checksums.  Source: `.upstream/compat.c:722` (`} else if (protocol_version >= 30) {`), `.upstream/io.c:2510` (`if (protocol_version < 30 || read_batch)`), `.upstream/io.c:2557` (`if (protocol_version < 30)`).
 
 Key changes:
-- **Compressed NDX:** `write_ndx()`/`read_ndx()` use delta-encoded single-byte format instead of 4-byte LE int.  NDX_DONE is 1 byte `0x00`.  Source: `.upstream/io.c:2503-2600`.  A peer-supplied index that overflows a signed int32 is rejected (`MAX_INT32` gate, `.upstream/io.c:2585`).
-- **Varint xmit flags:** When `CF_VARINT_FLIST_FLAGS` is set (via `v` in client_info), xmit flags use varint encoding instead of byte/shortint.  Source: `.upstream/flist.c:1098` (`if (xfer_flags_as_varint)`).
+- **Compressed NDX:** `write_ndx()`/`read_ndx()` use delta-encoded single-byte format instead of 4-byte LE int.  NDX_DONE is 1 byte `0x00`.  Source: `.upstream/io.c:2503-2547` (`write_ndx()`), `.upstream/io.c:2550-2592` (`read_ndx()`).  A peer-supplied index that overflows a signed int32 is rejected (`MAX_INT32` gate, `.upstream/io.c:2582-2586`).
+- **Varint xmit flags:** When `CF_VARINT_FLIST_FLAGS` is set (via `v` in client_info), xmit flags use varint encoding instead of byte/shortint.  Source: `.upstream/flist.c:644` (`if (xfer_flags_as_varint)`).
 - **Compat flags exchange:** Server sends compat flags as varint; client reads and sets features accordingly.  Source: `.upstream/compat.c:722-788`.
 - **`need_messages_from_generator` is always 1** for proto ≥ 30.  Source: `.upstream/compat.c:788` (`need_messages_from_generator = 1`), set unconditionally inside the `} else if (protocol_version >= 30) {` block.  This is set for ALL processes (not just senders).  For the daemon sender, this causes `start_server()` to set multiplexed input initially (for the filter list phase), but `do_server_sender()` switches to buffered input before reading selectors.
 - **Null-terminated args:** `rl_nulls = 1` for proto ≥ 30.  Source: `.upstream/clientserver.c:258`.
@@ -220,45 +220,45 @@ Key changes:
 - **Subprotocol version:** Greeting includes subprotocol version number.  Source: `.upstream/compat.c:844` (`io_printf(f_out, "@RSYNCD: %d.%d %s\n", ...)`).
 - **ACL and xattr support:** `--acls` and `--xattrs` require proto ≥ 30.  Source: `.upstream/compat.c:664-681`.
 - **Hard links:** New encoding with `XMIT_HLINK_FIRST` (bit 12), `XMIT_USER_NAME_FOLLOWS` (bit 10), `XMIT_GROUP_NAME_FOLLOWS` (bit 11).  Source: `.upstream/flist.c:1230` (`if (protocol_version >= 30 && BITS_SETnUNSET(xflags, XMIT_HLINKED, XMIT_HLINK_FIRST))`).
-- **Max block size:** Increased from `OLD_MAX_BLOCK_SIZE` (512) to `MAX_BLOCK_SIZE` (1048576).  Source: `.upstream/io.c:2215` (`int32 max_blength = protocol_version < 30 ? OLD_MAX_BLOCK_SIZE : MAX_BLOCK_SIZE`).
-- **SumHead validation:** Zero block length with nonzero count is rejected (`.upstream/io.c:2222`).  On 32-bit OFF_T, `count * blength` overflow is rejected (`.upstream/io.c:2228`).
+- **Max block size:** The checksum block length (blength) is now capped at `MAX_BLOCK_SIZE` (131072, 128 KiB) for protocol ≥ 30; older protocols allowed blength up to `OLD_MAX_BLOCK_SIZE` (536870912, 512 MiB).  Source: `.upstream/io.c:2197` (receive: `int32 max_blength = protocol_version < 30 ? OLD_MAX_BLOCK_SIZE : MAX_BLOCK_SIZE`), `.upstream/generator.c:725` (send: same gate).  Values: `MAX_BLOCK_SIZE = 1<<17` (131072), `OLD_MAX_BLOCK_SIZE = 1<<29` (536870912), `.upstream/rsync.h:161,164`.
+- **SumHead validation:** Zero block length with nonzero count is rejected (`.upstream/io.c:2225-2229`).  On 32-bit OFF_T, `count * blength` overflow is rejected (`.upstream/io.c:2234-2238`).
 
 #### Protocol 31 (rsync 3.1.0, 2013)
 
 Nanosecond timestamps, client keep-alive, delete phase.  Source: `.upstream/rsync.h:66` (`XMIT_MOD_NSEC` at bit 13, proto ≥ 31).
 
 Key changes:
-- **Nanosecond timestamps:** `XMIT_MOD_NSEC` flag in xmit flags; `mod_nsec` sent as varint.  Source: `.upstream/flist.c:506` (`if (NSEC_BUMP(file) && protocol_version >= 31) xflags |= XMIT_MOD_NSEC`), `.upstream/flist.c:1581` (receive side).
-- **Client keep-alive:** Client can send keep-alive messages.  The proto < 31 vs ≥ 31 distinction affects the files-from forwarding path (`.upstream/io.c:1723`, `start_filesfrom_forwarding()`) and the keep-alive mechanism (`.upstream/io.c:1723`, `maybe_send_keepalive()`).
-- **Delete phase:** Extra NDX_DONE exchange in final goodbye for delete operations.  Source: `.upstream/main.c:938` (`if (protocol_version >= 31 && i == NDX_DONE)`), `.upstream/generator.c:2869` (`if (protocol_version >= 31 && EARLY_DELETE_DONE_MSG())`).
-- **`MSG_ERROR_EXIT`:** Synchronize error exit between siblings.  Source: `.upstream/rsync.h:299` (`MSG_ERROR_EXIT=86`).
-- **`MSG_DELETED`:** File deletion notification.  Source: `.upstream/rsync.h:300` (`MSG_DELETED=101`).
-- **Data-duplicating bug fix:** Token ring checksum fix.  Source: `.upstream/token.c:478` (`if (protocol_version >= 31)`), `.upstream/token.c:706` (same gate).
+- **Nanosecond timestamps:** `XMIT_MOD_NSEC` flag in xmit flags; `mod_nsec` sent as varint.  Source: `.upstream/flist.c:582-583` (`if (NSEC_BUMP(file) && protocol_version >= 31) xflags |= XMIT_MOD_NSEC`), `.upstream/flist.c:1581` (receive side).
+- **Client keep-alive:** Client can send keep-alive messages via `maybe_send_keepalive()` (`.upstream/io.c:1613`).  The proto < 31 vs ≥ 31 distinction affects the files-from forwarding path (`.upstream/io.c:1372-1374`, `start_filesfrom_forwarding()`): for proto < 31, files-from data is sent without multiplexing.
+- **Delete phase:** Extra NDX_DONE exchange in final goodbye for delete operations.  Source: `.upstream/main.c:920-931` (`if (protocol_version >= 31 && i == NDX_DONE)`), `.upstream/generator.c:2867-2872` (`if (protocol_version >= 31 && EARLY_DELETE_DONE_MSG())`).
+- **`MSG_ERROR_EXIT`:** Synchronize error exit between siblings.  Source: `.upstream/rsync.h:305` (`MSG_ERROR_EXIT=86`).
+- **`MSG_DELETED`:** File deletion notification.  Source: `.upstream/rsync.h:307` (`MSG_DELETED=101`).
+- **Data-duplicating bug fix:** Token ring checksum fix.  Source: `.upstream/token.c:485` (`if (protocol_version >= 31)`), `.upstream/token.c:713` (same gate).
 - **Xattr optimization:** `want_xattr_optim` set for proto ≥ 31 unless `CF_AVOID_XATTR_OPTIM`.  Source: `.upstream/compat.c:758`.
 - **Safe incremental file list:** `use_safe_inc_flist` set for proto ≥ 31.  Source: `.upstream/compat.c:787`.
-- **IO timeout message:** Daemon can send `MSG_IO_TIMEOUT` to client.  Source: `.upstream/main.c:1296` (`if (am_daemon && io_timeout && protocol_version >= 31) send_msg_int(MSG_IO_TIMEOUT, io_timeout)`).
+- **IO timeout message:** Daemon can send `MSG_IO_TIMEOUT` to client.  Source: `.upstream/main.c:1294-1295` (`if (am_daemon && io_timeout && protocol_version >= 31) send_msg_int(MSG_IO_TIMEOUT, io_timeout)`).
 
 #### Protocol 32 (rsync 3.2.7, 2024)
 
-Security fix version number bump, digest name list on greeting becomes mandatory.  Source: `.upstream/clientserver.c:218-223` (fatal error if omitted on proto > 31).
+Security fix version number bump, digest name list on greeting becomes mandatory.  Source: `.upstream/clientserver.c:234-240` (fatal error if omitted on proto > 31).
 
 Key changes:
-- **Digest name list mandatory:** The digest list has always been included in the greeting by modern rsync (`.upstream/compat.c:851-853`, `output_daemon_greeting()` calls `get_default_nno_list()`).  For protocol 32+, omitting it is a fatal error (`.upstream/clientserver.c:218-223`, gate `remote_protocol > 31`).  For proto 30-31, it was optional (defaults to `md5`); for proto < 30, defaults to `md4`.
+- **Digest name list mandatory:** The digest list has always been included in the greeting by modern rsync (`.upstream/compat.c:851-853`, `output_daemon_greeting()` calls `get_default_nno_list()`).  For protocol 32+, omitting it is a fatal error (`.upstream/clientserver.c:234-240`, gate `remote_protocol > 31`).  For proto 30-31, it was optional (defaults to `md5`); for proto < 30, defaults to `md4`.
 - **Security fixes:** Protocol version bumped for security reasons (CVE-related).
 
 ### Protocol 32 (rsync 3.5.0, 2026) -- security hardening
 
 The protocol version remains 32, but rsync 3.5.0 adds significant wire-level security hardening:
 
-- **IOERR_VALID_MASK** (`.upstream/rsync.h:195`): Peer-supplied `MSG_IO_ERROR` values are masked to the defined `IOERR_*` bits (`IOERR_GENERAL | IOERR_VANISHED | IOERR_DEL_LIMIT`), preventing a malicious peer from setting arbitrary undefined bits in the local `io_error`.  Applied on receipt in `read_a_msg()` (`.upstream/io.c:1700`).
-- **Daemon handshake timeout** (`.upstream/io.c:120`, `.upstream/clientserver.c:87-96`): A separate deadline spans the pre-transfer handshake (greeting, module selection, auth, argument reading), preventing an unauthenticated peer from holding a connection slot open indefinitely.  Default 60 seconds, configurable via module `timeout`.
+- **IOERR_VALID_MASK** (`.upstream/rsync.h:199`): Peer-supplied `MSG_IO_ERROR` values are masked to the defined `IOERR_*` bits (`IOERR_GENERAL | IOERR_VANISHED | IOERR_DEL_LIMIT`), preventing a malicious peer from setting arbitrary undefined bits in the local `io_error`.  Applied on receipt in `read_a_msg()` (`.upstream/io.c:1702-1707`).
+- **Daemon handshake timeout** (`.upstream/io.c:115-118`, `.upstream/clientserver.c:87-96`): A separate deadline spans the pre-transfer handshake (greeting, module selection, auth, argument reading), preventing an unauthenticated peer from holding a connection slot open indefinitely.  Default 60 seconds, configurable via module `timeout`.
 - **MAX_DAEMON_ARGS** (`.upstream/io.c:1452`): The daemon argument count is bounded at `MAX_ARGS * 16` during `read_args()`, preventing unbounded memory growth from a peer trickling arguments.
-- **Compressed NDX overflow protection** (`.upstream/io.c:2585`): A peer-supplied index that overflows signed int32 is rejected with RERR_PROTOCOL.
-- **SumHead validation** (`.upstream/io.c:2222-2235`): Zero block length with nonzero count is rejected; on 32-bit OFF_T, `count * blength` overflow is rejected.
-- **MSG_IO_TIMEOUT validation** (`.upstream/io.c:1719`): The client caps the received value at 86400 seconds and rejects non-positive values, preventing a malicious server from disabling the client's timeout or overflowing signed arithmetic.
-- **Negotiation string fix** (`.upstream/compat.c:351`, `.upstream/compat.c:526-534`): Each side now picks its own most-preferred algorithm that also appears in the peer's list (was: server stopped at first acceptable client choice).  Honest peers converge on the strongest mutual choice; a peer that front-loads a weaker name only desyncs itself.
-- **iobuf.in_multiplexed placement** (`.upstream/io.c:1700-1820`): The `iobuf.in_multiplexed = 1` flag is now set AFTER message processing (not before), ensuring the message handler runs in a clean state.
-- **uid_ndx/gid_ndx timing** (`.upstream/compat.c:594-602`): The `uid_ndx`/`gid_ndx`/`acls_ndx`/`xattrs_ndx` assignments are now done AFTER `check_batch_flags()`, preventing a batch file's stream-flags from flipping preserve_uid/gid/acls/xattrs on with an uninitialized ndx slot.
+- **Compressed NDX overflow protection** (`.upstream/io.c:2582-2586`): A peer-supplied index that overflows signed int32 is rejected with RERR_PROTOCOL.
+- **SumHead validation** (`.upstream/io.c:2195-2252`): Zero block length with nonzero count is rejected; on 32-bit OFF_T, `count * blength` overflow is rejected.
+- **MSG_IO_TIMEOUT validation** (`.upstream/io.c:1712-1731`, cap at `.upstream/io.c:1724-1725`): The client caps the received value at 86400 seconds and rejects non-positive values, preventing a malicious server from disabling the client's timeout or overflowing signed arithmetic.
+- **Negotiation string fix** (`.upstream/compat.c:333-361`, `.upstream/compat.c:526-534`): Each side now picks its own most-preferred algorithm that also appears in the peer's list (was: server stopped at first acceptable client choice).  Honest peers converge on the strongest mutual choice; a peer that front-loads a weaker name only desyncs itself.
+- **iobuf.in_multiplexed placement** (`.upstream/io.c:1655-1900`, `read_a_msg()`): The `iobuf.in_multiplexed = 1` flag is now set AFTER message processing (not before), ensuring the message handler runs in a clean state.
+- **uid_ndx/gid_ndx timing** (`.upstream/compat.c:641-651`): The `uid_ndx`/`gid_ndx`/`acls_ndx`/`xattrs_ndx` assignments are now done AFTER `check_batch_flags()`, preventing a batch file's stream-flags from flipping preserve_uid/gid/acls/xattrs on with an uninitialized ndx slot.
 
 ### 2.3 Version gate summary
 
@@ -269,7 +269,7 @@ All `protocol_version` gates found via `grep -rn "protocol_version" .upstream/*.
 | checksum.c | 137 | `>= 30` | MD5 default |
 | checksum.c | 143 | `>= 27` | s2length in sum_head |
 | checksum.c | 145 | `>= 21` | checksum algorithm change |
-| compat.c | 608 | `== 0` | binary version exchange gate |
+| compat.c | 602 | `== 0` | binary version exchange gate |
 | compat.c | 653 | `<= 28` | msgs2stderr default |
 | compat.c | 664 | `< 30` | --acls/--xattrs require proto 30 |
 | compat.c | 684 | `< 30` | delete_before default |
@@ -278,7 +278,7 @@ All `protocol_version` gates found via `grep -rn "protocol_version" .upstream/*.
 | compat.c | 758 | `>= 31` | xattr optimization |
 | compat.c | 787 | `>= 31` | safe inc_flist |
 | compat.c | 788 | `>= 30` | need_messages_from_generator |
-| compat.c | 805 | `>= 30` | unsorted flist gate |
+| compat.c | 805 | `>= 30` | partial-dir filter perishable |
 | clientserver.c | 257 | `>= 30` | null-terminated args |
 | clientserver.c | 399 | `< 25` | kluge_around_eof |
 | clientserver.c | 456-457 | `< 23`, `== 22` | arg reading |
@@ -292,9 +292,10 @@ All `protocol_version` gates found via `grep -rn "protocol_version" .upstream/*.
 | flist.c | 582 | `>= 31` | XMIT_MOD_NSEC |
 | flist.c | 600 | `>= 30` | hlink encoding |
 | flist.c | 620 | `>= 28` | hlink pre-30 |
-| flist.c | 677 | `>= 28` | xflags encoding |
-| flist.c | 693 | `>= 30` | uid/gid varint |
-| flist.c | 705, 717 | `< 30` | uid/gid int32 |
+| flist.c | 644-658 | varint/`>= 28`/`< 28` | xflags encoding |
+| flist.c | 677 | `>= 30` | mtime as varlong |
+| flist.c | 693, 705 | `< 30` | uid/gid int32 (else varint) |
+| flist.c | 717 | `< 31` | special-file rdev |
 | flist.c | 718-724 | `< 28`, `>= 30` | device encoding |
 | flist.c | 741 | `< 30` | hlink dev number |
 | flist.c | 744 | `< 26` | 32-bit dev_t |
@@ -333,7 +334,7 @@ All `protocol_version` gates found via `grep -rn "protocol_version" .upstream/*.
 | generator.c | 2882 | `>= 29` | phase gate |
 | generator.c | 2888 | `>= 31` | delete done in phase |
 | generator.c | 2911 | `>= 31` | delete phase |
-| io.c | 1374 | `< 31` | keep-alive |
+| io.c | 1374 | `< 31` | filesfrom mux switch |
 | io.c | 1875 | `>= 31` | ERROR_EXIT |
 | io.c | 2197 | `< 30` | max block size |
 | io.c | 2240 | `< 27` | s2length default |
@@ -363,7 +364,7 @@ All `protocol_version` gates found via `grep -rn "protocol_version" .upstream/*.
 | sender.c | 340 | `>= 31` | lull mod |
 | sender.c | 473 | `< 29` | iflags write |
 | sender.c | 498 | `>= 29` | max_phase |
-| sender.c | 629, 668, 722 | `>= 30` | xattr/acl |
+| sender.c | 668, 722 | `>= 30` | MSG_NO_SEND |
 | sender.c | 809 | `>= 30` | io_error |
 | token.c | 485, 713 | `>= 31` | data-dup bug fix |
 ## 3. Process architecture reference
@@ -372,14 +373,14 @@ Rsync uses **three cooperating processes** during a data transfer.  Understandin
 
 ### 3.1 Generator (client-side)
 
-Parent process after `do_recv()` forks on the client side.  Purpose: receives the file list, sends selectors (file transfer requests) to the daemon, and reads status/completion messages from the receiver.  Source: `.upstream/main.c:1138` (parent becomes generator after fork).
+Parent process after `do_recv()` forks on the client side.  Purpose: receives the file list, sends selectors (file transfer requests) to the daemon, and reads status/completion messages from the receiver.  Source: `.upstream/main.c:1124` (parent becomes generator after fork, `am_generator = 1`; `do_recv()` forks at `.upstream/main.c:1065`).
 
 #### File descriptors (after fork)
 
-- `sock_f_out` -- daemon socket (write).  Set by `io_set_sock_fds()` in `client_run()` (`.upstream/main.c:1355`).  Remains open through the generator's lifetime.  Used to send selectors and NDX_DONE to the daemon.
-- `f_in` -- internal pipe from receiver.  Redirected from the daemon socket to `error_pipe[0]` after fork (`.upstream/main.c:1130`).  Used to read status messages (MSG_STATS, MSG_SUCCESS), NDX_DONE, and file list data (inc_recurse forwarding via `start_flist_forward()`) from the receiver.
+- `sock_f_out` -- daemon socket (write).  Set by `io_set_sock_fds()` in `client_run()` (`.upstream/main.c:1335`).  Remains open through the generator's lifetime.  Used to send selectors and NDX_DONE to the daemon.
+- `f_in` -- internal pipe from receiver.  Redirected from the daemon socket to `error_pipe[0]` after fork (`.upstream/main.c:1135-1136`).  Used to read status messages (MSG_STATS, MSG_SUCCESS), NDX_DONE, and file list data (inc_recurse forwarding via `start_flist_forward()`) from the receiver.
 - `f_out` -- daemon socket (write).  Unchanged from pre-fork; remains the daemon socket.  `io_start_buffering_out(f_out)` at `.upstream/main.c:1138` sets buffered output on the daemon socket.
-- `sock_f_in` -- set to -1 after fork (`.upstream/main.c:1130`).
+- `sock_f_in` -- set to -1 after fork (`.upstream/main.c:1135`).
 
 #### I/O mode (all protocol versions, no version gate)
 
@@ -392,19 +393,19 @@ Source: `.upstream/main.c:1138-1139`.
 
 **Key detail:** The generator's output to the daemon socket is buffered, even though `client_run()` may have set it to multiplexed before the fork.  `io_start_buffering_out(f_out)` at `.upstream/main.c:1138` overrides any earlier `io_start_multiplex_out(f_out)` from `.upstream/main.c:1357`.
 
-In `generate_files(f_out, local_name)`, the `f_out` parameter is the daemon socket fd (not the internal pipe).  The generator writes selectors and NDX_DONE to the daemon socket via `write_ndx(f_out, ndx)` (`.upstream/generator.c:2841`).  The generator reads status messages, NDX_DONE, and file list data (inc_recurse) from the receiver via `wait_for_receiver()` (`.upstream/io.c:1926`), which reads from `iobuf.in_fd` (the internal pipe, set up as `f_in`).
+In `generate_files(f_out, local_name)`, the `f_out` parameter is the daemon socket fd (not the internal pipe).  The generator writes selectors and NDX_DONE to the daemon socket via `write_ndx(f_out, ndx)` (selectors at `.upstream/generator.c:2376`, NDX_DONE at `.upstream/generator.c:2861`).  The generator reads status messages, NDX_DONE, and file list data (inc_recurse) from the receiver via `wait_for_receiver()` (`.upstream/io.c:1920`), which reads from `iobuf.in_fd` (the internal pipe, set up as `f_in`).
 
-**Source:** `.upstream/main.c:1138-1162` (generator side of fork), `.upstream/generator.c:2716-2928` (`generate_files()`).
+**Source:** `.upstream/main.c:1124-1163` (generator side of fork), `.upstream/generator.c:2716-2929` (`generate_files()`).
 
 ### 3.2 Receiver (client-side)
 
-Child process after `do_recv()` forks on the client side.  Purpose: reads file data from the daemon socket, writes files to disk, and sends completion status to the generator.  Source: `.upstream/main.c:1087` (child becomes receiver after fork).
+Child process after `do_recv()` forks on the client side.  Purpose: reads file data from the daemon socket, writes files to disk, and sends completion status to the generator.  Source: `.upstream/main.c:1071` (child becomes receiver after fork, `am_receiver = 1`; `do_recv()` forks at `.upstream/main.c:1065`).
 
 #### File descriptors
 
 - `f_in` -- daemon socket (read).  Inherits the daemon socket from the parent.  Used to read echoed selectors, file data, and checksums from the daemon.
-- `f_out` -- internal pipe to generator.  Set to `error_pipe[1]` (`.upstream/main.c:1085`).  Used to send MSG_SUCCESS, NDX_DONE, and file list data (inc_recurse forwarding) to the generator.
-- `sock_f_out` -- set to -1 after fork (`.upstream/main.c:1084`).
+- `f_out` -- internal pipe to generator.  Set to `error_pipe[1]` (`.upstream/main.c:1080`).  Used to send MSG_SUCCESS, NDX_DONE, and file list data (inc_recurse forwarding) to the generator.
+- `sock_f_out` -- set to -1 after fork (`.upstream/main.c:1079`).
 
 #### I/O mode
 
@@ -417,7 +418,7 @@ Source: `.upstream/main.c:1086-1087`.
 
 **Key detail:** The receiver reads from the daemon socket using multiplexed input (transparently unwraps MSG_DATA frames) and writes to the generator pipe using multiplexed output (wraps in MSG_DATA frames).  When the receiver sends `write_int(f_out, NDX_DONE)` it writes 4 bytes (`0xFFFFFFFF`) to the generator pipe, wrapped in a MSG_DATA frame.
 
-**Source:** `.upstream/main.c:1086-1137` (receiver side of fork), `.upstream/receiver.c:795-1377` (`recv_files()`).
+**Source:** `.upstream/main.c:1070-1122` (receiver side of fork), `.upstream/receiver.c:795-1377` (`recv_files()`).
 
 ### 3.3 Daemon (server-side)
 
@@ -435,11 +436,11 @@ Source: `.upstream/main.c:1292-1313`.
 | Direction | Mode | Proto gate | Source |
 |-----------|------|------------|--------|
 | Output (`f_out` → client socket) | **multiplexed** (MSG_DATA frames) | proto ≥ 23 | `.upstream/main.c:1293` (`io_start_multiplex_out(f_out)`) |
-| Input (`f_in` ← client socket) | **multiplexed** if `need_messages_from_generator`, else **buffered** (initially); switched to **buffered** for selector reading | see below | `.upstream/main.c:1308-1313`, `.upstream/main.c:991` |
+| Input (`f_in` ← client socket) | **multiplexed** if `need_messages_from_generator`, else **buffered** (initially); switched to **buffered** for selector reading | see below | `.upstream/main.c:1310-1313`, `.upstream/main.c:991` |
 
 `need_messages_from_generator` is set when:
 
-- `protocol_version >= 30` (`.upstream/compat.c:788`) -- set unconditionally inside the `} else if (protocol_version >= 30) {` block in `setup_protocol()`.  This is set for ALL processes (both client and server, sender and receiver), not just senders.  The `if (am_sender)` guard is in `start_server()` (`.upstream/main.c:1310`), which only checks the flag for the sender path.
+- `protocol_version >= 30` (`.upstream/compat.c:788`) -- set unconditionally inside the `} else if (protocol_version >= 30) {` block in `setup_protocol()`.  This is set for ALL processes (both client and server, sender and receiver), not just senders.  The `if (am_sender)` guard is in `start_server()` (`.upstream/main.c:1297`), which only checks the flag for the sender path.
 - `remove_source_files` (`--remove-source-files`) is set (`.upstream/options.c:2360`).
 
 For a standard pull (`rsync -av host::mod/ ./`) with proto ≥ 30, `need_messages_from_generator` is 1 (set by compat.c:788), so the daemon sets multiplexed input initially (for the filter list phase).  However, `do_server_sender()` switches to buffered input before reading selectors (`.upstream/main.c:991`).  For proto < 30, `need_messages_from_generator` remains 0 and daemon input is buffered throughout.
@@ -535,8 +536,8 @@ Trace for `rsync -av host::mod/ ./` (pull, proto 32).  Focus on the daemon socke
 - Parse version, subprotocol, and digest list.
 - Negotiate down to the lower version; subprotocol mismatch causes version downgrade.
 - Digest list: space-separated, client preference wins.
-- Subprotocol value is always included in the greeting format string (`.upstream/compat.c:853`, format `@RSYNCD: %d.%d %s\n`).  If the server's `sscanf` parse yields `remote_sub < 0` (parse failure), it is a fatal error for proto >= 30 (`.upstream/clientserver.c:218-224`) and defaults to 0 for proto < 30.
-- Digest list is always sent by modern rsync (`.upstream/compat.c:851-853`, `output_daemon_greeting()` calls `get_default_nno_list()`).  For proto > 31 (proto 32+), omitting it is a fatal error (`.upstream/clientserver.c:218-223`).  For proto 30-31, the receiver assumes `md5`; for proto < 30, it assumes `md4`.
+- Subprotocol value is always included in the greeting format string (`.upstream/compat.c:853`, format `@RSYNCD: %d.%d %s\n`).  If the server's `sscanf` parse yields `remote_sub < 0` (parse failure), it is a fatal error for proto >= 30 (`.upstream/clientserver.c:217-226`) and defaults to 0 for proto < 30.
+- Digest list is always sent by modern rsync (`.upstream/compat.c:851-853`, `output_daemon_greeting()` calls `get_default_nno_list()`).  For proto > 31 (proto 32+), omitting it is a fatal error (`.upstream/clientserver.c:234-240`).  For proto 30-31, the receiver assumes `md5`; for proto < 30, it assumes `md4` (`.upstream/compat.c:555-556`).
 
 ### Step 2: Module selection (text)
 
@@ -549,7 +550,7 @@ mod/\n
 
 **Process:** Client (pre-fork) → Daemon
 
-**Source:** `.upstream/clientserver.c:263-350` (`start_inband_exchange()` sends module name via `io_printf()`).
+**Source:** `.upstream/clientserver.c:395` (`io_printf(f_out, "%.*s\n", modlen, modname)` in `start_inband_exchange()`, `.upstream/clientserver.c:263-464`).
 
 ### Step 3: Authentication (text, optional)
 
@@ -564,7 +565,7 @@ mod/\n
 
 **Process:** Daemon ↔ Client (pre-fork)
 
-**Source:** `.upstream/clientserver.c:408-416` (auth challenge/response parsed inline), `.upstream/clientserver.c:809` (`auth_server()` sends challenge).
+**Source:** `.upstream/clientserver.c:408-414` (auth challenge/response parsed inline), `.upstream/clientserver.c:809` (`auth_server()` sends challenge).
 
 ### Step 4: Argument transmission (text → binary transition)
 
@@ -582,14 +583,14 @@ mod/\n
 
 **Process:** Client (pre-fork) → Daemon
 
-**Source:** `.upstream/clientserver.c:263-350` (`start_inband_exchange()` sends arguments), `.upstream/clientserver.c:1154` (`read_args()` parses arguments).  Null-terminated for proto ≥ 30 (`rl_nulls` set at `.upstream/clientserver.c:257`), newline-terminated otherwise.
+**Source:** `.upstream/clientserver.c:439-451` (`start_inband_exchange()` sends arguments), `.upstream/clientserver.c:1154` (`read_args()` invoked; defined at `.upstream/io.c:1454-1525`).  Null-terminated for proto ≥ 30 (`rl_nulls` set at `.upstream/clientserver.c:257`), newline-terminated otherwise.
 
 **Details:**
 - First arg is always `"."` (current directory).
 - The `e` flag: everything after `e` in the combined short-options arg is the `client_info` string (feature flags like `i`, `L`, `s`, `f`, `x`, `C`, `I`, `v`, `u`).
 - Double null (`\x00\x00`) or double newline (`\n\n`) terminates.
 
-(The binary protocol version exchange at `.upstream/compat.c:598-608` is **skipped** for daemon connections because `remote_protocol` is already set during the greeting exchange.  The guard `if (remote_protocol == 0)` at `.upstream/compat.c:598` is false for daemon connections.  This exchange only happens for SSH/rsh transport.)
+(The binary protocol version exchange at `.upstream/compat.c:602-609` is **skipped** for daemon connections because `remote_protocol` is already set during the greeting exchange.  The guard `if (remote_protocol == 0)` at `.upstream/compat.c:602` is false for daemon connections.  This exchange only happens for SSH/rsh transport.)
 
 ### Step 5: Compat flags exchange (binary, proto ≥ 30)
 
@@ -605,10 +606,10 @@ Server → Client: varint(compat_flags)
 **Source:** `.upstream/compat.c:722-755` (compat flags setup and exchange in `setup_protocol()`).
 
 **Details:**
-- Server builds `compat_flags` based on compile-time capabilities and client's advertised feature flags (from `-e` argument).  Source: `.upstream/compat.c:723-754`.
+- Server builds `compat_flags` based on compile-time capabilities and client's advertised feature flags (from `-e` argument).  Source: `.upstream/compat.c:723-750`.
 - If client sent `V` flag (legacy superseded pre-release flag): sent as `write_byte()` (`.upstream/compat.c:747-749`).  The `V` flag was from an old pre-release that got superseded; it forces `CF_VARINT_FLIST_FLAGS` and uses `write_byte()` instead of `write_varint()` for backward compatibility.
 - Otherwise: sent as `write_varint()` (`.upstream/compat.c:750`).
-- Client reads as `read_varint()` -- compatible with both `write_byte()` and `write_varint()` when the 0x80 bit is not set (`.upstream/compat.c:751`).
+- Client reads as `read_varint()` -- compatible with both `write_byte()` and `write_varint()` when the 0x80 bit is not set (`.upstream/compat.c:751-752`).
 - If `CF_VARINT_FLIST_FLAGS` (`v` flag) is set, xmit flags use varint encoding.
 
 **Compat flag bits:**
@@ -647,11 +648,11 @@ Client → Server: vstring("zlib")          -- compression list (if server sent 
 
 **Details:**
 - A **vstring** is: `length : uint8` (or 2 bytes if high bit set) followed by `data : raw[length]`.
-- `negotiate_the_strings()` is called unconditionally for all protocol versions (`.upstream/compat.c:820`).  However, `send_negotiate_str()` (`.upstream/compat.c:534`) only calls `write_vstring()` when `do_negotiated_strings` is 1.
-- `do_negotiated_strings` is set to 1 when the compat flags exchange (step 5) includes `CF_VARINT_FLIST_FLAGS` (`.upstream/compat.c:742`, `750``).  This requires proto ≥ 30 and the `v` flag in `client_info`.
-- When `do_negotiated_strings` is 0: `send_negotiate_str()` sends nothing (`.upstream/compat.c:534`), and `recv_negotiate_str()` just validates that the default algorithm (`"md5"` for proto ≥ 30, `"md4"` otherwise) is acceptable (`.upstream/compat.c:555-558`).  No vstring data is exchanged.
-- When `do_negotiated_strings` is 1: each side sends its list *before* reading the other's list to avoid deadlock (`.upstream/compat.c:539`), and both sides pick the first match from the client's list.
-- Compression negotiation only happens if `do_compression` is set (`.upstream/compat.c:552`).
+- `negotiate_the_strings()` is called unconditionally for all protocol versions (`.upstream/compat.c:820`).  However, `send_negotiate_str()` (`.upstream/compat.c:506-535`) only calls `write_vstring()` when `do_negotiated_strings` is 1 (`.upstream/compat.c:533-534`).
+- `do_negotiated_strings` is set to 1 when the compat flags exchange (step 5) includes `CF_VARINT_FLIST_FLAGS` (`.upstream/compat.c:742` server side, `.upstream/compat.c:752-754` client side).  This requires proto ≥ 30 and the `v` flag in `client_info`.
+- When `do_negotiated_strings` is 0: `send_negotiate_str()` sends nothing (`.upstream/compat.c:533-534`), and `recv_negotiate_str()` just validates that the default algorithm (`"md5"` for proto ≥ 30, `"md4"` otherwise) is acceptable (`.upstream/compat.c:555-558`).  No vstring data is exchanged.
+- When `do_negotiated_strings` is 1: each side sends its list *before* reading the other's list to avoid deadlock (`.upstream/compat.c:539`), and each side then picks its own most-preferred name that also appears in the peer's list (`.upstream/compat.c:333-361`, `.upstream/compat.c:529-533` comment).
+- Compression negotiation only happens if `do_compression` is set (`.upstream/compat.c:547-548`).
 - If the other side is too old to negotiate, `negotiate_the_strings` just ensures the environment didn't disallow the old algorithm (`.upstream/compat.c:572-574`).
 
 **When `CF_VARINT_FLIST_FLAGS` is set:** The full negotiation exchange happens, and the chosen algorithm is stored in `valid_checksums.negotiated_nni` / `valid_compressions.negotiated_nni`.  When not set, these are NULL and the defaults are used.
@@ -678,13 +679,13 @@ Server → Client: 0x9F 0x3A 0x01 0x00  (checksum_seed as int32 LE, example valu
 
 **Process:** Both sides
 
-**Source:** `.upstream/main.c:1293` (daemon output), `.upstream/main.c:1355-1363` (client).
+**Source:** `.upstream/main.c:1293` (daemon output), `.upstream/main.c:1356-1364` (client).
 
 **What happens:**
 - Daemon: `io_start_multiplex_out(f_out)` at `.upstream/main.c:1293` (proto ≥ 23).
 - Daemon: `io_start_multiplex_in(f_in)` at `.upstream/main.c:1311` for proto ≥ 30 (because `need_messages_from_generator` is always 1), or `io_start_buffering_in(f_in)` at `.upstream/main.c:1313` for proto < 30.
 - Client sender: `io_start_multiplex_out(f_out)` at `.upstream/main.c:1357` (proto ≥ 30).
-- Client sender: `io_start_multiplex_in(f_in)` at `.upstream/main.c:1362` (proto ≥ 31 or proto ≥ 23 without filesfrom_host).
+- Client sender: `io_start_multiplex_in(f_in)` at `.upstream/main.c:1361` (proto ≥ 31 or proto ≥ 23 without filesfrom_host, gate at `.upstream/main.c:1360`).
 - Client receiver (pre-fork): `io_start_multiplex_in(f_in)` at `.upstream/main.c:1399` (proto ≥ 23).
 
 **After this point, the daemon→client channel (Channel 2) flows through the multiplexed I/O layer.**  The generator→daemon channel (Channel 1) uses buffered I/O for selector reading: the generator writes selectors as raw bytes (buffered output), and the daemon reads them as raw bytes (buffered input, switched by `io_start_buffering_in(f_in)` in `do_server_sender()` at `.upstream/main.c:991`).
@@ -748,7 +749,7 @@ name_suffix       : raw[name_suffix_len]
 
 **Process:** Generator ↔ Daemon
 
-**Source:** `.upstream/generator.c:2830-2928` (`generate_files()` phase loop), `.upstream/sender.c:498-560` (`send_files()` phase loop), `.upstream/io.c:1926-1960` (`wait_for_receiver()`).
+**Source:** `.upstream/generator.c:2831-2929` (`generate_files()` phase loop), `.upstream/sender.c:498-560` (`send_files()` phase loop), `.upstream/io.c:1920-1956` (`wait_for_receiver()`).
 
 **Overview:** The phase exchange coordinates the end of the selector loop between the generator and daemon.  It is intertwined with the receiver's progress -- the generator waits for the receiver to finish processing each phase before signaling the daemon.
 
@@ -763,25 +764,25 @@ The generator communicates on two channels simultaneously:
 The daemon reads selectors from the generator on the daemon socket (buffered input) and writes echoed selectors and file data to the receiver on the same socket (multiplexed output).
 
 **Main transfer phase (phase 0 → 1):**
-1. Generator sends all selectors to daemon via `recv_generator()` (`.upstream/generator.c:2788`).
-2. Generator waits for receiver to finish: `while (!msgdone_cnt) wait_for_receiver()` (`.upstream/generator.c:2832`).  The receiver writes `write_int(f_out, NDX_DONE)` (4-byte LE, -1) to the generator pipe (`.upstream/receiver.c:854`), and `wait_for_receiver()` increments `msgdone_cnt` (`.upstream/io.c:1935`).
-3. Generator writes `write_ndx(f_out, NDX_DONE)` (compressed, 1 byte `0x00`) to daemon socket (`.upstream/generator.c:2841`).
-4. Daemon reads NDX_DONE via `read_ndx_and_attrs()` (`.upstream/sender.c:525`), increments phase, writes `write_ndx(f_out, NDX_DONE)` to client socket (`.upstream/sender.c:543-545`).
+1. Generator sends all selectors to daemon via `recv_generator()` (called per-file at `.upstream/generator.c:2818`).
+2. Generator waits for receiver to finish: `while (!msgdone_cnt) wait_for_receiver()` (`.upstream/generator.c:2850-2855`).  The receiver writes `write_int(f_out, NDX_DONE)` (4-byte LE, -1) to the generator pipe (`.upstream/receiver.c:860`), and `wait_for_receiver()` increments `msgdone_cnt` (`.upstream/io.c:1935`).
+3. Generator writes `write_ndx(f_out, NDX_DONE)` (compressed, 1 byte `0x00`) to daemon socket (`.upstream/generator.c:2861`).
+4. Daemon reads NDX_DONE via `read_ndx_and_attrs()` (`.upstream/sender.c:520-521`), increments phase, writes `write_ndx(f_out, NDX_DONE)` to client socket (`.upstream/sender.c:544`).
 
 **Redo phase (phase 1 → 2, proto ≥ 29):**
 5. Generator may send an early NDX_DONE if `EARLY_DELAY_DONE_MSG()` is true (no `--delay-updates`): `write_ndx(f_out, NDX_DONE)` (`.upstream/generator.c:2864-2865`).
 6. For proto ≥ 31, if `EARLY_DELETE_DONE_MSG()` is true (no `--delete` or `--delay-deletes`): sends delete stats and another NDX_DONE (`.upstream/generator.c:2867-2872`).
-7. Generator waits for redo completion: `while (msgdone_cnt <= 1) wait_for_receiver()` (`.upstream/generator.c:2877`).
+7. Generator waits for redo completion: `while (msgdone_cnt <= 1) wait_for_receiver()` (`.upstream/generator.c:2875-2880`).
 8. For proto ≥ 29, if not early: sends delay-updates NDX_DONE (`.upstream/generator.c:2886-2889`).
 9. Generator waits for delay-updates completion: `while (msgdone_cnt == 2) wait_for_receiver()` (`.upstream/generator.c:2892`).
 
 **Delete phase (proto ≥ 31):**
-10. For proto ≥ 31, if not early: sends delete NDX_DONE (`.upstream/generator.c:2914-2917`).
-11. Generator waits for delete completion: `while (msgdone_cnt == 3) wait_for_receiver()` (`.upstream/generator.c:2921`).
+10. For proto ≥ 31, if not early: sends delete stats and delete NDX_DONE (`.upstream/generator.c:2912-2916`).
+11. Generator waits for delete completion: `while (msgdone_cnt == 3) wait_for_receiver()` (`.upstream/generator.c:2919-2920`).
 
 **For proto < 29 (max_phase = 1):**
 - No phase exchange -- the generator just sends selectors and NDX_DONE, and the daemon processes them in a single pass.
-- If `!inc_recurse`, the generator sends `write_ndx(f_out, NDX_DONE)` after all selectors (`.upstream/generator.c:2821`).
+- If `!inc_recurse`, the generator sends `write_ndx(f_out, NDX_DONE)` after all selectors (`.upstream/generator.c:2831-2833`).
 
 **Critical distinction:** Generator uses `write_ndx(f_out, NDX_DONE)` which produces 1 byte `0x00` on the daemon socket (compressed NDX, buffered output).  Receiver uses `write_int(f_out, NDX_DONE)` which produces 4 bytes `0xFFFFFFFF` on the internal pipe (fixed-width int, multiplexed output).
 
@@ -808,17 +809,17 @@ MSG_SUCCESS: [ndx as int32 LE]
 
 **Process:** Generator → Daemon (Channel 1, buffered), Daemon → Receiver (Channel 2, multiplexed)
 
-**Source:** `.upstream/generator.c:2822-2827` (generator sends selectors via `sock_f_out`), `.upstream/sender.c:520-640` (daemon reads selectors via `read_ndx_and_attrs` and sends data).
+**Source:** `.upstream/generator.c:588-597` (generator sends selectors via `sock_f_out` in `itemize()`; the transfer ndx is written at `.upstream/generator.c:2376`), `.upstream/sender.c:520` (daemon reads selectors via `read_ndx_and_attrs`), `.upstream/sender.c:766-781` (sends sum_head + delta data).
 
 **Details:**
-- Generator sends selectors via `recv_generator()` (`.upstream/generator.c:1608-1831`), which calls `write_ndx(sock_f_out, ndx)` and `write_shortint(sock_f_out, iflags)` for proto ≥ 29 (`.upstream/generator.c:2822-2824`).  Output is buffered (raw bytes).
+- Generator sends selectors via `recv_generator()` (`.upstream/generator.c:1608-2457`), which writes the ndx via `write_ndx(f_out, ndx)` (`.upstream/generator.c:2376`) and calls `itemize()` (`.upstream/generator.c:517-612`), which writes `write_shortint(sock_f_out, iflags)` for proto ≥ 29 (`.upstream/generator.c:588-597`).  Output is buffered (raw bytes).
 - Daemon reads selectors via `read_ndx_and_attrs(f_in, f_out, ...)` (`.upstream/rsync.c:323-434`), which uses buffered input (raw bytes) -- switched by `io_start_buffering_in(f_in)` in `do_server_sender()` (`.upstream/main.c:991`).  This applies to all protocol versions.
 - Daemon echoes each selector to the client via `write_ndx_and_attrs(f_out, ...)` (`.upstream/sender.c:468-483`), which uses multiplexed output (MSG_DATA frames).
 - Receiver reads echoed selectors via **multiplexed input** (transparently unwraps MSG_DATA).
-- For TRANSFER selectors, daemon sends sum_head + block checksums + delta fill data (`.upstream/sender.c:614-638`).
-- For non-TRANSFER selectors, daemon just echoes the selector (`.upstream/sender.c:610-612`).
-- The generator interleaves selector sending with `check_for_finished_files()` and `wait_for_receiver()` to monitor the receiver's progress (`.upstream/generator.c:2798-2800`).  This allows the generator to pause if the receiver is behind.
-- For `inc_recurse`, the generator waits for sub-file-lists to arrive before continuing (`.upstream/generator.c:2815-2823`).
+- For TRANSFER selectors, daemon sends sum_head + block checksums + delta fill data (`.upstream/sender.c:766-781`, `write_sum_head()` at `.upstream/sender.c:767`, `match_sums()` at `.upstream/sender.c:779`).
+- For non-TRANSFER selectors, daemon just echoes the selector (`.upstream/sender.c:583-601`, echo at `.upstream/sender.c:585`).
+- The generator interleaves selector sending with `check_for_finished_files()` and periodic `maybe_send_keepalive()` / `maybe_flush_socket()` to monitor the receiver's progress (`.upstream/generator.c:2818-2827`).  This allows the generator to pause if the receiver is behind.
+- For `inc_recurse`, the generator waits for sub-file-lists to arrive before continuing (`.upstream/generator.c:2836-2841`).
 
 ### Step 13: Final goodbye (binary)
 
@@ -833,7 +834,7 @@ Daemon → Generator: 0x00  (NDX_DONE as compressed NDX, echoed)
 
 **Process:** Generator ↔ Daemon
 
-**Source:** `.upstream/main.c:908-939` (`read_final_goodbye()`), `.upstream/main.c:1154` (generator sends `write_ndx(f_out, NDX_DONE)` after `generate_files()` returns), `.upstream/main.c:1001` (server reads via `read_final_goodbye()`).
+**Source:** `.upstream/main.c:908-939` (`read_final_goodbye()`), `.upstream/main.c:1154-1157` (generator sends `write_ndx(f_out, NDX_DONE)` after `generate_files()` returns), `.upstream/main.c:996-997` (server reads via `read_final_goodbye()`).
 
 **Details for proto ≥ 31:**
 - Extra round-trip: after first NDX_DONE exchange, server writes another NDX_DONE and reads another from client.
@@ -882,7 +883,7 @@ Trace for `rsync --list-only host::` (module listing, proto 32).  This is an alt
 
 **Process:** Client (pre-fork) → Daemon
 
-**Source:** `.upstream/clientserver.c:1559` (`strcmp(line, "#list") == 0`).
+**Source:** `.upstream/clientserver.c:1554` (`strcmp(line, "#list") == 0`).
 
 **Step 3: Module listing response**
 
@@ -916,7 +917,7 @@ public          Public HTML site\n
 
 **Source:** `.upstream/clientserver.c:1385` (`if (protocol_version >= 25) io_printf(fd, "@RSYNCD: EXIT\n")`), `.upstream/clientserver.c:399` (`kluge_around_eof = list_only && protocol_version < 25 ? 1 : 0`).
 
-**Client behavior:** Reads lines until `@RSYNCD: EXIT` or EOF, then exits cleanly (`.upstream/clientserver.c:426-432`).
+**Client behavior:** Reads lines until `@RSYNCD: EXIT` or EOF, then exits cleanly (`.upstream/clientserver.c:401-437`, EXIT handling at `.upstream/clientserver.c:416-421`).
 
 ## 6. Wire protocol step-by-step (SSH/rsh transport)
 
@@ -938,15 +939,15 @@ Client → Server: 0x20 0x00 0x00 0x00  (protocol_version = 32, int32 LE)
 Server → Client: 0x20 0x00 0x00 0x00  (remote_protocol = 32, int32 LE)
 ```
 
-**Source:** `.upstream/compat.c:598-608`.
+**Source:** `.upstream/compat.c:602-609`.
 
 **Details:**
 - Only happens when `remote_protocol == 0` (initial value for SSH/rsh, `.upstream/compat.c:75`).
-- Server writes `protocol_version` as 4-byte LE int via `write_int()` (`.upstream/compat.c:602`).
-- Client reads `remote_protocol` as 4-byte LE int via `read_int()` (`.upstream/compat.c:603`).
-- Negotiates down to the lower version (`.upstream/compat.c:604-605`).
-- If `remote_protocol < MIN_PROTOCOL_VERSION` or `> MAX_PROTOCOL_VERSION`, error: "protocol version mismatch -- is your shell clean?" (`.upstream/compat.c:631-637`).
-- If `remote_protocol < OLD_PROTOCOL_VERSION`, a warning is logged (`.upstream/compat.c:639-642`).
+- Server writes `protocol_version` as 4-byte LE int via `write_int()` (`.upstream/compat.c:606`).
+- Client reads `remote_protocol` as 4-byte LE int via `read_int()` (`.upstream/compat.c:607`).
+- Negotiates down to the lower version (`.upstream/compat.c:608-609`).
+- If `remote_protocol < MIN_PROTOCOL_VERSION` or `> MAX_PROTOCOL_VERSION`, error: "protocol version mismatch -- is your shell clean?" (`.upstream/compat.c:621-625`).
+- If `remote_protocol < OLD_PROTOCOL_VERSION`, a warning is logged (`.upstream/compat.c:627-630`).
 
 ### Step 3: Compat flags exchange (proto ≥ 30)
 
@@ -970,15 +971,15 @@ Same as daemon socket §5.10.  Source: `.upstream/main.c:983` (`send_file_list()
 
 ### Step 8: Phase exchange
 
-Same as daemon socket §5.11.  Source: `.upstream/generator.c:2830-2928`, `.upstream/sender.c:498-560`.
+Same as daemon socket §5.11.  Source: `.upstream/generator.c:2831-2929`, `.upstream/sender.c:498-560`.
 
 ### Step 9: Selector loop
 
-Same as daemon socket §5.12.  Source: `.upstream/generator.c:2822-2827`, `.upstream/sender.c:520-640`.
+Same as daemon socket §5.12.  Source: `.upstream/generator.c:588-597`, `.upstream/sender.c:520-781`.
 
 ### Step 10: Final goodbye
 
-Same as daemon socket §5.13.  Source: `.upstream/main.c:908-939` (`read_final_goodbye()`), `.upstream/generator.c:2841` (`write_ndx(f_out, NDX_DONE)`).
+Same as daemon socket §5.13.  Source: `.upstream/main.c:908-939` (`read_final_goodbye()`), `.upstream/generator.c:2861` (`write_ndx(f_out, NDX_DONE)`).
 
 ### Step 11: Stats exchange
 
@@ -1016,7 +1017,7 @@ When multiplexed input is enabled:
 2. `io_start_buffering_in(fd)` is called internally.
 
 When `read_buf()` is called:
-1. If `IN_MULTIPLEXED` and buffer is empty, `read_a_msg()` (`.upstream/io.c:1723`) is called.
+1. If `IN_MULTIPLEXED` and buffer is empty, `read_a_msg()` (`.upstream/io.c:1655`) is called.
 2. `read_a_msg()` reads a 4-byte header via `raw_read_int()`, extracts msg code and length.
 3. For MSG_DATA: `iobuf.raw_input_ends_before` marks where the payload ends.
 4. `read_buf()` reads from the transparent byte stream, fetching more MSG_DATA frames as needed.
@@ -1072,7 +1073,7 @@ The compressed NDX encoding is the same in both cases; only the framing differs.
 
 ### 8.1 Client side (sender path, `client_run()`)
 
-**Source:** `.upstream/main.c:1355-1363`.
+**Source:** `.upstream/main.c:1356-1364`.
 
 | Direction | Proto 27 | Proto 30 | Proto 31 | Proto 32 |
 |-----------|----------|----------|----------|----------|
@@ -1081,7 +1082,7 @@ The compressed NDX encoding is the same in both cases; only the framing differs.
 
 \* Input is buffered when `filesfrom_host` is set and proto < 31.  Otherwise multiplexed for proto ≥ 23.
 
-**Source lines:** Output: `.upstream/main.c:1355-1359`.  Input: `.upstream/main.c:1361-1363`.
+**Source lines:** Output: `.upstream/main.c:1356-1359`.  Input: `.upstream/main.c:1360-1363`.
 
 ### 8.2 Client side (receiver path, pre-fork in `client_run()`)
 
@@ -1132,7 +1133,7 @@ The compressed NDX encoding is the same in both cases; only the framing differs.
 
 For `am_receiver` (push), `do_server_recv()` sets its own I/O mode separately (see table below).
 
-**Source lines:** Output: `.upstream/main.c:1292-1293`.  Input: `.upstream/main.c:1308-1313` (`if (need_messages_from_generator) io_start_multiplex_in(f_in); else io_start_buffering_in(f_in);`).  Selector switch: `.upstream/main.c:991` (`io_start_buffering_in(f_in)` in `do_server_sender()`).
+**Source lines:** Output: `.upstream/main.c:1292-1293`.  Input: `.upstream/main.c:1310-1313` (`if (need_messages_from_generator) io_start_multiplex_in(f_in); else io_start_buffering_in(f_in);`).  Selector switch: `.upstream/main.c:991` (`io_start_buffering_in(f_in)` in `do_server_sender()`).
 
 ### 8.6 Server side (daemon recv path, `do_server_recv()`)
 
@@ -1150,7 +1151,7 @@ For `am_receiver` (push), `do_server_recv()` sets its own I/O mode separately (s
 
 4 bytes, **little-endian**, signed int32.
 
-**Source:** `.upstream/io.c:2342-2348` (`write_int`), `.upstream/io.c:1965-1981` (`read_int`).
+**Source:** `.upstream/io.c:2342-2347` (`write_int`), `.upstream/io.c:1965-1977` (`read_int`).
 
 ### 9.2 Variable-length integers (`varint`, protocol ≥ 30)
 
@@ -1158,7 +1159,7 @@ Compact encoding for signed int32.  Uses a lookup table (`int_byte_extra[]`) ind
 
 **Source:** `.upstream/io.c:2349-2369` (`write_varint`), `.upstream/io.c:1986-2016` (`read_varint`).
 
-**Encoding algorithm:** The value is written as little-endian in bytes 1-4 of a 5-byte buffer.  Leading zero bytes are trimmed.  The first byte encodes the length via the `int_byte_extra[]` lookup table (`.upstream/io.c:120-123`), indexed by `first_byte / 4`:
+**Encoding algorithm:** The value is written as little-endian in bytes 1-4 of a 5-byte buffer.  Leading zero bytes are trimmed.  The first byte encodes the length via the `int_byte_extra[]` lookup table (`.upstream/io.c:167-172`), indexed by `first_byte / 4`:
 
 | First byte range | Extra bytes | Total bytes |
 |-----------------|-------------|-------------|
@@ -1176,7 +1177,7 @@ Compact encoding for signed int32.  Uses a lookup table (`int_byte_extra[]`) ind
 
 Similar to varint but for int64 with configurable minimum byte count.
 
-**Source:** `.upstream/io.c:2371-2405` (`write_varlong`), `.upstream/io.c:2018-2057` (`read_varlong`).
+**Source:** `.upstream/io.c:2371-2401` (`write_varlong`), `.upstream/io.c:2018-2057` (`read_varlong`).
 
 Common uses: file sizes (`write_varlong30(f, size, 3)`), timestamps (`write_varlong(f, time, 4)`).
 
@@ -1185,7 +1186,7 @@ Common uses: file sizes (`write_varlong30(f, size, 3)`), timestamps (`write_varl
 For values in `[0, 0x7FFFFFFF]`: `write_int(value)` -- 4 bytes LE.
 For larger values (or negative): sentinel `0xFFFFFFFF` (4 bytes) followed by full 8-byte LE int64.  Total: 12 bytes.
 
-**Source:** `.upstream/io.c:2407-2429` (`write_longint`).
+**Source:** `.upstream/io.c:2407-2425` (`write_longint`).
 
 ### 9.5 Short integers (`write_shortint` / `read_shortint`)
 
@@ -1199,7 +1200,7 @@ Used for: extended xflags (when `XMIT_EXTENDED_FLAGS` is set, proto ≥ 28), ite
 
 Stateful delta encoding.  Initial state: `prev_positive = -1`, `prev_negative = 1`.
 
-**Source:** `.upstream/io.c:2503-2552` (`write_ndx`), `.upstream/io.c:2550-2600` (`read_ndx`).
+**Source:** `.upstream/io.c:2503-2547` (`write_ndx`), `.upstream/io.c:2550-2592` (`read_ndx`).
 
 **Writing:**
 1. `ndx == NDX_DONE (-1)`: single byte `0x00` (no side effects).
@@ -1233,7 +1234,7 @@ If `len & 0x80`: actual length = `(len & 0x7F) * 256 + next_byte`.
 
 ### 10.1 Frame format
 
-**Source:** `.upstream/rsync.h:203` (`MPLEX_BASE = 7`), `.upstream/io.c:755` (header construction), `.upstream/io.c:1728-1732` (header parsing).
+**Source:** `.upstream/rsync.h:210` (`MPLEX_BASE = 7`), `.upstream/io.c:758` (MSG_DATA header construction), `.upstream/io.c:1155` (message header construction), `.upstream/io.c:1667-1670` (header parsing in `read_a_msg()`).
 
 Every frame: 4-byte header + payload.  Header is a **little-endian uint32**:
 ```
@@ -1243,7 +1244,7 @@ where MPLEX_BASE = 7, length in bits [0..23] (max ~16MB per frame)
 
 ### 10.2 Message codes (`enum msgcode`)
 
-**Source:** `.upstream/rsync.h:286-302`.
+**Source:** `.upstream/rsync.h:293-308`.
 
 | Code | Name | Description | Payload | Direction |
 |------|------|-------------|---------|-----------|
@@ -1282,16 +1283,20 @@ Upstream uses two separate output paths with circular buffers (32KB default, `IO
 
 ### 11.1 Xmit flags encoding
 
-**Source:** `.upstream/flist.c` -- `send_file_list()`, `write_xmit_flags()`.
+**Source:** `.upstream/flist.c:644-658` (send, in `send_file_entry()`), `.upstream/flist.c:2944-2974` (receive, in `recv_file_list()`), `.upstream/flist.c:2384-2394` (`write_end_of_flist()`).
 
-**Protocol ≥ 30 with `CF_VARINT_FLIST_FLAGS`:** Varint encoding.  If xflags is zero, send varint(`XMIT_EXTENDED_FLAGS`) as sentinel (zero signals end-of-list).
+The xmit flags word is the first field of every file entry.  A zero word signals end-of-list, so the sender never transmits an actual zero.
+
+**Varint encoding (`CF_VARINT_FLIST_FLAGS`, proto ≥ 30):** the full 16-bit xflags value is sent as a varint; if xflags is zero, `XMIT_EXTENDED_FLAGS` is sent as a stand-in (`.upstream/flist.c:644-645`).  End-of-list: varint `0` followed by a varint io_error value (`.upstream/flist.c:2386-2388`, read at `.upstream/flist.c:2946-2951`).
 
 **Protocol 28-29:**
-1. If `xflags == 0` and not a directory: inject `XMIT_TOP_DIR`.
-2. If `(xflags & 0xFF00) || xflags == 0`: set `XMIT_EXTENDED_FLAGS` bit, `write_shortint(xflags)` (2 bytes LE).
-3. Otherwise: `write_byte(xflags)`.
+1. If `xflags == 0` and not a directory: inject `XMIT_TOP_DIR` (`.upstream/flist.c:647-648`).
+2. If `(xflags & 0xFF00) || xflags == 0`: set `XMIT_EXTENDED_FLAGS` bit, `write_shortint(xflags)` (2 bytes LE) (`.upstream/flist.c:649-651`).
+3. Otherwise: `write_byte(xflags)` (`.upstream/flist.c:652-653`).
 
-**Protocol < 28:** If no flags set: add harmless flag (`XMIT_LONG_NAME` for dirs, `XMIT_TOP_DIR` for files).  Then `write_byte(xflags)`.
+**Protocol < 28:** If no flags set: add harmless flag (`XMIT_LONG_NAME` for dirs, `XMIT_TOP_DIR` for files).  Then `write_byte(xflags)` (`.upstream/flist.c:654-657`).
+
+**End-of-list (byte path):** a single zero byte (`.upstream/flist.c:2393`), or -- when the sender had an I/O error and the peer supports safe incremental flists -- `write_shortint(XMIT_EXTENDED_FLAGS|XMIT_IO_ERROR_ENDLIST)` followed by a varint io_error value (`.upstream/flist.c:2390-2391`, read at `.upstream/flist.c:2960-2966`).
 
 ### 11.2 Xmit flag bits
 
@@ -1325,7 +1330,7 @@ XMIT_CRTIME_EQ_MTIME      = 1 << 17  (any proto, --crtimes)
 
 ### 11.3 File entry wire layout
 
-Source: `.upstream/flist.c:420-760` (send), `.upstream/flist.c:860-1170` (receive).
+Source: `.upstream/flist.c:475-775` (`send_file_entry()`), `.upstream/flist.c:777-1392` (`recv_file_entry()`).
 
 ```
 1. [if XMIT_SAME_NAME] prefix_length : uint8
@@ -1364,7 +1369,7 @@ Source: `.upstream/flist.c:420-760` (send), `.upstream/flist.c:860-1170` (receiv
 
 ### 12.1 SumHead (`write_sum_head` / `read_sum_head`)
 
-**Source:** `.upstream/io.c:2193-2270` (`read_sum_head` at line 2025, `write_sum_head` at line 2072).
+**Source:** `.upstream/io.c:2193-2270` (`read_sum_head` at line 2195, `write_sum_head` at line 2257).
 
 All fields are **int32 LE**:
 ```
@@ -1405,7 +1410,7 @@ sum2[i] : raw[s2length]     // strong hash (MD4/MD5 = 16, SHA-256 = 32, etc)
 
 ### 13.1 Selector wire format
 
-**Source:** `.upstream/generator.c:2822-2827` (generator sends), `.upstream/sender.c:468-483` (daemon echoes).
+**Source:** `.upstream/generator.c:588-597` (generator sends in `itemize()`, transfer ndx at `.upstream/generator.c:2376`), `.upstream/sender.c:468-483` (daemon echoes).
 
 ```
 ndx       : compressed NDX (proto ≥ 30) or int32 LE (older)
@@ -1451,10 +1456,10 @@ For proto < 29: `iflags` not sent, defaults to `ITEM_TRANSFER | ITEM_MISSING_DAT
 
 Same semantic meaning (NDX_DONE = -1), but different wire format and different channel.
 
-- **Generator** (`generate_files()`, `.upstream/generator.c:2841`): `write_ndx(f_out, NDX_DONE)` → compressed NDX → 1 byte `0x00` on the daemon socket (buffered output, raw bytes).  Here `f_out` is the daemon socket fd.
-- **Receiver** (`recv_files()`, `.upstream/receiver.c:854`): `write_int(f_out, NDX_DONE)` → 4-byte LE int32 → 4 bytes `0xFF 0xFF 0xFF 0xFF` on the internal pipe (multiplexed output, inside MSG_DATA frame).
+- **Generator** (`generate_files()`, `.upstream/generator.c:2861`): `write_ndx(f_out, NDX_DONE)` → compressed NDX → 1 byte `0x00` on the daemon socket (buffered output, raw bytes).  Here `f_out` is the daemon socket fd.
+- **Receiver** (`recv_files()`, `.upstream/receiver.c:860`): `write_int(f_out, NDX_DONE)` → 4-byte LE int32 → 4 bytes `0xFF 0xFF 0xFF 0xFF` on the internal pipe (multiplexed output, inside MSG_DATA frame).
 
-The generator talks to the daemon (Channel 1, buffered) and the receiver talks to the generator (Channel 3, multiplexed).  The receiver always uses `write_int()` because the generator's `wait_for_receiver()` (`.upstream/io.c:1926`) reads via `read_int(iobuf.in_fd)` (`.upstream/io.c:1935`).
+The generator talks to the daemon (Channel 1, buffered) and the receiver talks to the generator (Channel 3, multiplexed).  The receiver always uses `write_int()` because the generator's `wait_for_receiver()` (`.upstream/io.c:1920`) reads via `read_int(iobuf.in_fd)` (`.upstream/io.c:1926`).
 
 ### 14.2 `read_ndx_and_attrs()` reads from one fd and echoes to another
 
@@ -1475,13 +1480,13 @@ If you read the socket as raw bytes when mux is enabled, you'll get garbled data
 
 ### 14.4 `sock_f_out` vs `f_out` -- generator fd redirection
 
-Generator redirects `f_in` to the internal pipe but `f_out` and `sock_f_out` both still point to the daemon socket.  Source: `.upstream/main.c:1130` (generator redirects `f_in` to `error_pipe[0]`), `.upstream/main.c:1138` (generator sets buffered output on `f_out` which is the daemon socket at this point).
+Generator redirects `f_in` to the internal pipe but `f_out` and `sock_f_out` both still point to the daemon socket.  Source: `.upstream/main.c:1135-1136` (generator redirects `f_in` to `error_pipe[0]`), `.upstream/main.c:1138` (generator sets buffered output on `f_out` which is the daemon socket at this point).
 
 After the fork:
 - Generator: `f_in` = internal pipe (from receiver), `f_out` = daemon socket, `sock_f_out` = daemon socket.
 - Receiver: `f_in` = daemon socket, `f_out` = internal pipe (to generator), `sock_f_out` = -1.
 
-The generator sends selectors to `sock_f_out` (daemon socket) via `write_ndx(sock_f_out, ndx)` (`.upstream/generator.c:2822`).  In `generate_files(f_out, local_name)`, the `f_out` parameter is the daemon socket fd (NOT the internal pipe).  The generator writes NDX_DONE and selectors to the daemon socket via `write_ndx(f_out, ndx)` (`.upstream/generator.c:2841`) and reads status messages, NDX_DONE, and file list data (inc_recurse) from the receiver via `wait_for_receiver()` which reads from `iobuf.in_fd` (the internal pipe).
+The generator sends selectors to `sock_f_out` (daemon socket) via `write_ndx(sock_f_out, ndx)` in `itemize()` (`.upstream/generator.c:591-592`).  In `generate_files(f_out, local_name)`, the `f_out` parameter is the daemon socket fd (NOT the internal pipe).  The generator writes NDX_DONE via `write_ndx(f_out, NDX_DONE)` (`.upstream/generator.c:2861`) and selector ndx via `write_ndx(f_out, ndx)` (`.upstream/generator.c:2376`), and reads status messages, NDX_DONE, and file list data (inc_recurse) from the receiver via `wait_for_receiver()` which reads from `iobuf.in_fd` (the internal pipe).
 
 ### 14.5 `io_start_buffering_out(f_out)` in generator overrides earlier mux setup
 
@@ -1491,15 +1496,15 @@ Before the fork, `client_run()` sets up multiplexed output on the daemon socket.
 
 ### 14.6 `write_ndx_and_attrs()` in sender.c echoes selectors
 
-The echo happens in a separate function call, not inside `read_ndx_and_attrs()`.  Source: `.upstream/sender.c:468-483` (`write_ndx_and_attrs()`), `.upstream/sender.c:585,640,727` (callers).
+The echo happens in a separate function call, not inside `read_ndx_and_attrs()`.  Source: `.upstream/sender.c:468-483` (`write_ndx_and_attrs()`), `.upstream/sender.c:585,640,766` (callers).
 
 When the daemon processes a selector, it calls `read_ndx_and_attrs(f_in, f_out, ...)` to read it, then `write_ndx_and_attrs(f_out, ...)` to echo it.  The echo uses `write_ndx()` (compressed NDX) on the multiplexed output channel, so the echoed selector appears as a MSG_DATA frame on the wire.
 
 ### 14.7 Phase exchange uses different functions on client vs server
 
-Generator uses `write_ndx()` (compressed NDX), receiver uses `write_int()` (4-byte LE).  Source: Generator: `.upstream/generator.c:2841` (`write_ndx(f_out, NDX_DONE)`).  Receiver: `.upstream/receiver.c:854` (`write_int(f_out, NDX_DONE)`).
+Generator uses `write_ndx()` (compressed NDX), receiver uses `write_int()` (4-byte LE).  Source: Generator: `.upstream/generator.c:2861` (`write_ndx(f_out, NDX_DONE)`).  Receiver: `.upstream/receiver.c:860` (`write_int(f_out, NDX_DONE)`).
 
-The daemon sender also uses `write_ndx()` for the phase exchange (`.upstream/sender.c:547`), matching the generator's format.  The receiver uses `write_int()` because the generator's `wait_for_receiver()` (`.upstream/io.c:1926`) expects 4-byte LE ints via `read_int(iobuf.in_fd)`.
+The daemon sender also uses `write_ndx()` for the phase exchange (`.upstream/sender.c:544`), matching the generator's format.  The receiver uses `write_int()` because the generator's `wait_for_receiver()` (`.upstream/io.c:1926`) expects 4-byte LE ints via `read_int(iobuf.in_fd)`.
 
 ### 14.8 Stats exchange uses `handle_stats()` with different behavior per process
 
@@ -1512,7 +1517,7 @@ The daemon sender also uses `write_ndx()` for the phase exchange (`.upstream/sen
 
 ### 14.9 `need_messages_from_generator` is set unconditionally for proto ≥ 30, but daemon switches to buffered for selectors
 
-For proto ≥ 30, `need_messages_from_generator` is always 1 (set at `.upstream/compat.c:788` inside the `} else if (protocol_version >= 30) {` block).  This is set for ALL processes (both client and server, sender and receiver), not just senders.  The `if (am_sender)` guard is in `start_server()` (`.upstream/main.c:1310`), which only checks the flag for the sender path.  This is NOT just for `inc_recurse` -- it is set unconditionally for all proto ≥ 30 connections.
+For proto ≥ 30, `need_messages_from_generator` is always 1 (set at `.upstream/compat.c:788` inside the `} else if (protocol_version >= 30) {` block).  This is set for ALL processes (both client and server, sender and receiver), not just senders.  The `if (am_sender)` guard is in `start_server()` (`.upstream/main.c:1297`), which only checks the flag for the sender path.  This is NOT just for `inc_recurse` -- it is set unconditionally for all proto ≥ 30 connections.
 
 In `start_server()`, this causes the daemon to set multiplexed input (`.upstream/main.c:1311`).  However, `do_server_sender()` calls `io_start_buffering_in(f_in)` (`.upstream/main.c:991`) which switches to buffered input **before** `send_files()` reads selectors.  So the actual selector reading uses buffered input, matching the generator's buffered output.
 
@@ -1520,24 +1525,24 @@ The multiplexed input is only used for the filter list phase (read by `recv_filt
 
 ### 14.10 Daemon socket protocol (text greeting) vs SSH/rsh protocol (binary version exchange)
 
-The `remote_protocol == 0` gate (`.upstream/compat.c:598`) determines which path is taken:
+The `remote_protocol == 0` gate (`.upstream/compat.c:602`) determines which path is taken:
 - Daemon socket: `remote_protocol` is set by the greeting parse, so the binary exchange is skipped.
 - SSH/rsh: `remote_protocol` starts at 0, so the binary `write_int`/`read_int` exchange happens.
 
 ## 15. Quick Reference & Common Pitfalls
 
-1. **When the real rsync client (proto 32) connects to our server via daemon socket, what I/O mode does the generator use to send selectors?** Buffered (raw bytes).  Source: `.upstream/main.c:1138` (`io_start_buffering_out(f_out)`).  The generator calls `write_ndx(sock_f_out, ndx)` (`.upstream/generator.c:2822`) which writes compressed NDX as raw bytes.
+1. **When the real rsync client (proto 32) connects to our server via daemon socket, what I/O mode does the generator use to send selectors?** Buffered (raw bytes).  Source: `.upstream/main.c:1138` (`io_start_buffering_out(f_out)`).  The generator calls `write_ndx(sock_f_out, ndx)` in `itemize()` (`.upstream/generator.c:591-592`) which writes compressed NDX as raw bytes.
 
 2. **What I/O mode does the daemon use to send file data to the receiver?** Multiplexed (MSG_DATA frames).  Source: `.upstream/main.c:1293` (`io_start_multiplex_out(f_out)` for proto ≥ 23).
 
 3. **Does the receiver read from the daemon socket using mux or buffered input?** Multiplexed for proto ≥ 23.  Source: `.upstream/main.c:1398-1399` (`if (protocol_version >= 23) io_start_multiplex_in(f_in);` in `client_run()` receiver path).
 
-4. **What wire format does NDX_DONE have on the daemon socket vs the internal pipe?** 1 byte `0x00` on socket for proto ≥ 30 (compressed NDX, buffered), 4 bytes `0xFFFFFFFF` on pipe (int32 LE of -1, multiplexed).  Source: Generator: `.upstream/io.c:2509-2522` (`write_ndx()`).  Receiver: `.upstream/receiver.c:854` (`write_int(f_out, NDX_DONE)`).
+4. **What wire format does NDX_DONE have on the daemon socket vs the internal pipe?** 1 byte `0x00` on socket for proto ≥ 30 (compressed NDX, buffered), 4 bytes `0xFFFFFFFF` on pipe (int32 LE of -1, multiplexed).  Source: Generator: `.upstream/io.c:2503-2547` (`write_ndx()`; NDX_DONE branch at `.upstream/io.c:2519-2522`, proto < 30 / batch fallback at `.upstream/io.c:2509-2512`).  Receiver: `.upstream/receiver.c:860` (`write_int(f_out, NDX_DONE)`).
 
 5. **What I/O mode does the daemon use to read selectors from the generator on proto 32?** Buffered (raw bytes).  Source: `.upstream/main.c:991` (`io_start_buffering_in(f_in)` in `do_server_sender()`).  Although `start_server()` sets multiplexed input for proto ≥ 30 (because `need_messages_from_generator` is always 1 at `.upstream/compat.c:788`, set for all processes), `do_server_sender()` switches to buffered input before reading selectors.  The multiplexed input is only used for the filter list phase.
 
-6. **How does the SSH/rsh version exchange differ from the daemon socket greeting?** Binary `write_int`/`read_int` when `remote_protocol == 0` (`.upstream/compat.c:598-608`), vs text `@RSYNCD:` parse (`.upstream/clientserver.c:209`).
+6. **How does the SSH/rsh version exchange differ from the daemon socket greeting?** Binary `write_int`/`read_int` when `remote_protocol == 0` (`.upstream/compat.c:602-609`), vs text `@RSYNCD:` parse (`.upstream/clientserver.c:209`).
 
 7. **What changed at protocol version 23?** Multiplexed I/O layer introduced.  Source: `.upstream/main.c:1292` (`if (protocol_version >= 23) io_start_multiplex_out(f_out)`).
 
-8. **What changed at protocol version 30?** Compressed NDX (`.upstream/io.c:2509`), varint xmit flags (`.upstream/flist.c:677`), compat flags exchange (`.upstream/compat.c:722`), subprotocol version (`.upstream/compat.c:853`), null-terminated args (`.upstream/clientserver.c:257`), `need_messages_from_generator` always 1 (`.upstream/compat.c:788`), MD5 default checksums (`.upstream/compat.c:415`), ACL/xattr support (`.upstream/compat.c:664`).
+8. **What changed at protocol version 30?** Compressed NDX (`.upstream/io.c:2509`), varint xmit flags (`.upstream/flist.c:644`), compat flags exchange (`.upstream/compat.c:722`), subprotocol version (`.upstream/compat.c:853`), null-terminated args (`.upstream/clientserver.c:257`), `need_messages_from_generator` always 1 (`.upstream/compat.c:788`), MD5 default checksums (`.upstream/compat.c:415`), ACL/xattr support (`.upstream/compat.c:664`).
