@@ -9,6 +9,8 @@ Implement the rsync daemon protocol as a pair of `Client` and `Server` structs i
 
 Both implementations should be library-first: no CLI, no TCP handling, no encryption -- just clean primitives that callers can wire up however they need.
 
+The highest level ideal is pure filesystem isomorphism -- `rsync://` protocol become filesystem abstraction.
+
 ## Protocol Support
 
 - Support all protocol versions that upstream `rsync` currently supports (`MIN_PROTOCOL_VERSION` **20** through current `PROTOCOL_VERSION` **32**, with forward-compatibility headroom to `MAX_PROTOCOL_VERSION` **40**)
@@ -58,7 +60,7 @@ It should be possible to:
 
 `Client.Connect()` accepts an `io.ReadWriter` for the connection.  If `rw` is nil and `ConnectFunc` is set, `ConnectFunc` is called with the configured module name to create the connection automatically.
 
-In root mode, there should be some way to present each module's "comment" value inside the filesystem representation.  Exact shape is TBD (the filesystem doesn't have great places for freeform metadata) -- possibilities include a filename that cannot be a valid module name like `<module>\t<comment>` (matching the `#list` protocol itself, sorting correctly in `ls`), or a virtual file at the root, etc
+In root mode, there should be some way to present each module's "comment" value inside the filesystem representation.  Exact shape for now is `.<module>\t<comment>` as a symlink pointing to `<module>`.
 
 **Connection model constraint:** The server closes the connection after `#list` (verified against upstream -- the child process calls `_exit()` immediately after `send_listing()`).  This means root mode cannot use a single persistent connection.  Each `#list` call (root `ls`) and each module access requires its own dedicated connection.  The `Session` in root mode is a config holder, not a live connection.
 

@@ -13,7 +13,7 @@ type Server struct {
 	modules map[string]*ServerModule
 
 	// Greeting is the greeting the server advertises on every connection.
-	// Zero-value fields use defaults (version 32, digests ["md5", "md4"]).
+	// Zero-value fields are filled by [protocol.Greeting.ApplyDefaults].
 	Greeting protocol.Greeting
 }
 
@@ -33,7 +33,7 @@ type ServerModule struct {
 
 // NewServer creates a new rsync daemon server with the provided modules.
 func NewServer(mods ...*ServerModule) (*Server, error) {
-	// TODO: implement (Task 12)
+	// TODO implement (Task 12)
 	return nil, nil
 }
 
@@ -45,6 +45,6 @@ func NewServer(mods ...*ServerModule) (*Server, error) {
 // authentication, argument parsing, compat flags, checksum negotiation,
 // file list transfer, selector loop, data transfer, final goodbye.
 func (s *Server) HandleConnection(rw io.ReadWriter) error {
-	// TODO: implement (Task 13)
+	// TODO implement (Task 13)
 	return nil
 }

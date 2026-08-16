@@ -576,7 +576,7 @@ The main API of the library.  It builds on `protocol/` for all wire details and 
 // Construct with NewServer.  A single Server handles multiple connections.
 type Server struct {
     // Greeting is the greeting the server advertises on every connection.
-    // Zero-value fields use defaults (version 32, digests ["md5", "md4"]).
+    // Zero-value fields are filled by [protocol.Greeting.ApplyDefaults].
     Greeting protocol.Greeting
 }
 
@@ -610,6 +610,7 @@ func (s *Server) HandleConnection(rw io.ReadWriter) error
 
 - The server implements the daemon socket protocol exclusively.  SSH/rsh transport uses a different protocol flow (no greeting, no module selection, no auth, no argument transmission, binary version exchange instead) and is not supported.  If SSH/rsh support is needed, it would require a separate API.
 - `HandleConnection` is the single entry point -- one call per connection.  The Server itself is stateless and reusable.
+- `Server.Greeting` and `ServerModule.AuthCallback` are direct fields, not passed per-call.  This prevents per-connection config mutation and keeps the API surface minimal -- there's no `HandleOptions` struct to wire up on every call.
 - Auth is per-module (via `ServerModule.AuthCallback`), matching rsync's per-module secrets file model.
 - The server reads selectors from the raw connection (buffered I/O) and writes data through the mux layer.  This I/O mode split is internal to `HandleConnection`.
 - The server enforces a handshake timeout (default 60 seconds) on the pre-transfer handshake (greeting, module selection, auth, argument reading).  This prevents an unauthenticated peer from holding a connection slot open indefinitely.  The timeout is internal and not currently configurable.
@@ -626,7 +627,7 @@ type Client struct {
     Module string
 
     // Greeting is sent to the server during the greeting exchange.
-    // Zero-value fields use defaults (version 32, digests ["md5", "md4"]).
+    // Zero-value fields are filled by [protocol.Greeting.ApplyDefaults].
     Greeting protocol.Greeting
 
     // AuthUser is the username for module authentication.
@@ -642,6 +643,15 @@ type Client struct {
     // ConnectFunc creates a new connection to the rsync server.
     // The moduleName argument is the target module, or "" for #list.
     // Required for root mode.  Also used by Connect(nil).
+    //
+    // In root mode, each FS operation (listing modules, opening a
+    // module) gets its own connection -- the server closes the
+    // connection after #list, so a single persistent connection is
+    // not possible.
+    //
+    // When used with [Client.Connect] and a nil io.ReadWriter,
+    // ConnectFunc is called with the configured Module name to create
+    // the connection.
     ConnectFunc func(moduleName string) (io.ReadWriter, error)
 }
 
@@ -655,6 +665,15 @@ func PasswordAuth(password string) func(digest string, challenge []byte) ([]byte
 - `Client` is a plain config struct -- no constructor, no hidden state.  Value semantics.
 - Zero-value fields get defaults lazily during `Connect()` or `OpenRoot()`.
 - `ConnectFunc` is the transport abstraction: the caller provides TCP dialing, SSH session creation, etc.
+
+### Root mode: module comment representation
+
+In root mode (`Module == ""`), modules are presented as top-level directories.  To preserve the module's "comment" metadata through the `fs.FS` interface (without type assertions or custom methods), each module emits **two** directory entries:
+
+- `<module>` -- the canonical directory (the actual module, `Open` target)
+- `.<module>\t<comment>` -- a **symlink** pointing to `<module>` (hidden by default, preserves `#list` tab-separated format, visible in `ls -la`, sorts predictably)
+
+This keeps `ReadDir` → `Open` isomorphic: the symlink name is openable (follows to the module directory), and the canonical module name is always the direct `Open` target.
 
 ### Session
 
@@ -715,6 +734,7 @@ func (s *Session) Open(name string) (fs.File, error)
 - `Open` on a directory reads the file list from the server and returns directory entries.
 - `Open` on a regular file sends a selector and reads the data through the delta transfer protocol.
 - `Session` is not safe for concurrent use (the connection state is shared).  See the Session godoc for patterns (session pool, cache-backed single session).
+- `io.ReaderAt` is intentionally **not** implemented on files returned by `Open`.  The rsync protocol has no random-access primitive -- a selector triggers a full sequential transfer.  Supporting `ReadAt` would require buffering the entire file in memory or on disk, which is a caching concern that belongs in the caller's cache layer, not the protocol library.
 
 ### Future: writability (push operations)
 

@@ -19,7 +19,7 @@ type Client struct {
 	// string enables root mode (all modules as top-level directories).
 	Module string
 
-	// Greeting is the greeting sent to the server. Zero value fields
+	// Greeting is the greeting sent to the server. Zero-value fields
 	// are filled by [protocol.Greeting.ApplyDefaults].
 	Greeting protocol.Greeting
 
@@ -92,7 +92,7 @@ var _ fs.FS = (*Session)(nil)
 // If rw is nil and Client.ConnectFunc is set, ConnectFunc creates the connection.
 // For root mode (Module == ""), use OpenRoot instead.
 func (c Client) Connect(rw io.ReadWriter) (*Session, error) {
-	// TODO: implement (Task 15)
+	// TODO implement (Task 15)
 	return nil, nil
 }
 
@@ -100,12 +100,12 @@ func (c Client) Connect(rw io.ReadWriter) (*Session, error) {
 // Does not establish a live connection -- each FS operation gets its own.
 // Requires Client.ConnectFunc to be set.
 func (c Client) OpenRoot() (*Session, error) {
-	// TODO: implement (Task 15)
+	// TODO implement (Task 15)
 	return nil, nil
 }
 
 // Open implements fs.FS.  Opens the named file or directory within the module.
 func (s *Session) Open(name string) (fs.File, error) {
-	// TODO: implement (Task 16)
+	// TODO implement (Task 16)
 	return nil, nil
 }
