@@ -53,18 +53,57 @@ const (
 //
 // Normal data is accumulated via Write() and sent as MSG_DATA frames on Flush().
 // Control messages use SendMsg(), which flushes pending data first.
+//
+// The buffer is bounded by the writer's configured size (default 32KB matching
+// upstream's IO_BUFFER_SIZE).  When Write() would exceed this limit, the buffer
+// is flushed automatically.  This prevents unbounded memory growth during large
+// file transfers and ensures the remote end receives data incrementally.
 type Writer struct {
-	w   io.Writer
-	buf bytes.Buffer // accumulates raw writes for batching into MSG_DATA frames
+	w          io.Writer
+	buf        bytes.Buffer // accumulates raw writes for batching into MSG_DATA frames
+	bufSize    int          // max buffer size before auto-flush (0 = unlimited)
 }
 
-func NewWriter(w io.Writer) *Writer { return &Writer{w: w} }
+func NewWriter(w io.Writer) *Writer {
+	return &Writer{w: w, bufSize: defaultBufSize}
+}
+
+// SetBufferSize sets the maximum buffer size before auto-flush.
+// A value of 0 disables auto-flush (buffer grows unbounded).
+// The default is 32KB, matching upstream's IO_BUFFER_SIZE.
+func (w *Writer) SetBufferSize(size int) {
+	w.bufSize = size
+}
 
 // Write accumulates raw bytes.  They will be sent as MSG_DATA on Flush().
 // This matches upstream's write_buf() behavior -- the caller never sees mux headers.
 // Multiple small Writes are batched into larger frames for efficiency.
+// If the buffer is full, it is flushed before more data is written, keeping
+// buffered memory bounded by the configured buffer size.
 func (w *Writer) Write(p []byte) (n int, err error) {
-	return w.buf.Write(p)
+	if w.bufSize == 0 {
+		return w.buf.Write(p)
+	}
+
+	for len(p) > 0 {
+		if w.buf.Len() >= w.bufSize {
+			if err := w.Flush(); err != nil {
+				return n, err
+			}
+		}
+		remaining := w.bufSize - w.buf.Len()
+		chunk := p
+		if len(chunk) > remaining {
+			chunk = chunk[:remaining]
+		}
+		wn, err := w.buf.Write(chunk)
+		n += wn
+		if err != nil {
+			return n, err
+		}
+		p = p[wn:]
+	}
+	return n, nil
 }
 
 // Flush sends accumulated data as MSG_DATA frame(s).

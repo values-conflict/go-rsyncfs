@@ -62,6 +62,8 @@ const (
 
 Accumulates raw bytes via `Write()` and sends them as MSG_DATA frames on `Flush()`.  Control messages use `SendMsg()`, which flushes pending data first.
 
+The buffer is bounded by a configurable size (default 32KB matching upstream's IO_BUFFER_SIZE).  When `Write()` would exceed this limit, the buffer is flushed automatically before more data is written.  This prevents unbounded memory growth during large file transfers and ensures the remote end receives data incrementally.
+
 ```go
 // Writer wraps an io.Writer with multiplexed frame encoding.
 // Normal data flows through Write() and is batched into MSG_DATA frames.
@@ -72,6 +74,8 @@ func NewWriter(w io.Writer) *Writer
 
 // Write accumulates raw bytes for batching into MSG_DATA frames.
 // Matches upstream write_buf() -- caller never sees mux headers.
+// If the buffer is full, it is flushed before more data is written,
+// keeping buffered memory bounded by the configured buffer size.
 func (w *Writer) Write(p []byte) (n int, err error)
 
 // Flush sends accumulated data as MSG_DATA frame(s).
@@ -81,6 +85,11 @@ func (w *Writer) Flush() error
 // SendMsg sends a non-DATA message.  Flushes pending buffered data first
 // to ensure MSG_DATA frames precede control messages.
 func (w *Writer) SendMsg(code uint8, payload []byte) error
+
+// SetBufferSize sets the maximum buffer size before auto-flush.
+// A value of 0 disables auto-flush (buffer grows unbounded).
+// The default is 32KB, matching upstream's IO_BUFFER_SIZE.
+func (w *Writer) SetBufferSize(size int)
 ```
 
 ### Reader

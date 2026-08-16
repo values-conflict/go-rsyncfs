@@ -7,10 +7,6 @@
 
 - should we summarize the relevant tianonfmt rules here somewhere so they're easier/quicker to reference?  maybe make the upstream tianonfmt docs themselves tighter somehow?
 
-- update the plan to create explicit `ExampleXXX` Go testing functions that demonstrate how to create a TCP-based rsync `Server` and/or `Client`
-
 - can we somehow get creative with the `net.Pipe` usage / tests to avoid the goroutines entirely?
-
-- our `protocol/mux` implementation doesn't actually bound the size of the buffer (and flush when it's full) - it will fill up forever, which may or may not cause issues at some point?  maybe it's fine but I don't think so - I think we need to probably flush more often so that the remote end knows what our progress is (and because TCP packets are not unbounded in size and our files might get big enough to trigger something like `bytes.ErrTooLarge` on our `bytes.Buffer`)
 
 - if `.upstream/rsync` exists, `integration_test.go` should prefer it (maybe even before consulting `PATH`? we should explore pros/cons of this)

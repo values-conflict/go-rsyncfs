@@ -209,3 +209,133 @@ func TestEmptyDataframe(t *testing.T) {
 		t.Errorf("expected 0 bytes for empty Write+Flush, got %d", buf.Len())
 	}
 }
+
+func TestWriter_AutoFlush(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	w.SetBufferSize(10) // tiny buffer for testing
+
+	// Write 20 bytes -- auto-flushes first 10, last 10 stays in buffer
+	data := []byte("0123456789ABCDEFGHIJ")
+	if _, err := w.Write(data); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	// First 10 bytes flushed as auto-flush frame; last 10 in buffer
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	// Verify frame boundaries: 2 frames of 10 bytes each
+	r := NewReader(&buf)
+	chunk1, err := r.ReadDataChunk()
+	if err != nil {
+		t.Fatalf("ReadDataChunk 1: %v", err)
+	}
+	if !bytes.Equal(chunk1, data[:10]) {
+		t.Errorf("chunk1: got %q, want %q", chunk1, data[:10])
+	}
+	chunk2, err := r.ReadDataChunk()
+	if err != nil {
+		t.Fatalf("ReadDataChunk 2: %v", err)
+	}
+	if !bytes.Equal(chunk2, data[10:]) {
+		t.Errorf("chunk2: got %q, want %q", chunk2, data[10:])
+	}
+}
+
+func TestWriter_AutoFlushMultipleChunks(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	w.SetBufferSize(32) // small buffer
+
+	// Write 256 bytes -- 7 auto-flushed frames + 1 in buffer
+	data := make([]byte, 256)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+
+	if _, err := w.Write(data); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	// Verify frame boundaries using ReadDataChunk
+	r := NewReader(&buf)
+	expectedChunks := 8
+	for i := 0; i < expectedChunks; i++ {
+		chunk, err := r.ReadDataChunk()
+		if err != nil {
+			t.Fatalf("ReadDataChunk %d: %v", i, err)
+		}
+		if len(chunk) != 32 {
+			t.Errorf("chunk %d: got %d bytes, want 32", i, len(chunk))
+		}
+		expected := data[i*32 : (i+1)*32]
+		if !bytes.Equal(chunk, expected) {
+			t.Errorf("chunk %d: data mismatch", i)
+		}
+	}
+}
+
+func TestWriter_AutoFlushBatchesSmallWrites(t *testing.T) {
+	// Multiple small writes should batch until buffer is full
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	w.SetBufferSize(32)
+
+	// Write 5 bytes at a time -- should batch into one 30-byte frame
+	for i := 0; i < 6; i++ {
+		w.Write([]byte{byte(i)})
+	}
+	// 6 bytes written, buffer has 6 bytes, no auto-flush yet
+	w.Flush()
+
+	// Should be a single frame with all 6 bytes
+	r := NewReader(&buf)
+	chunk, err := r.ReadDataChunk()
+	if err != nil {
+		t.Fatalf("ReadDataChunk: %v", err)
+	}
+	if len(chunk) != 6 {
+		t.Errorf("got %d bytes, want 6", len(chunk))
+	}
+}
+
+func TestWriter_SetBufferSizeZero(t *testing.T) {
+	// Disabling auto-flush should allow unbounded buffer
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	w.SetBufferSize(0) // disable auto-flush
+
+	data := make([]byte, 64*1024)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+
+	// Write should NOT auto-flush
+	if _, err := w.Write(data); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	// Buffer should still be empty (nothing flushed yet)
+	if buf.Len() != 0 {
+		t.Errorf("expected 0 bytes written (no auto-flush), got %d", buf.Len())
+	}
+
+	// Explicit flush should work
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	r := NewReader(&buf)
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Errorf("got %d bytes, want %d", len(got), len(data))
+	}
+}

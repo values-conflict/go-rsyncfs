@@ -6,6 +6,8 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 **No "Known Gaps" allowed.**  If a task is incomplete, its title is not strikethrough.  If implementation reveals the plan is wrong, update the plan.  If a feature is out of scope for a task, split the task.  Never document a gap as accepted debt -- either finish the work or leave the task unmarked.
 
+**New tasks go where they would've gone if planned all along**, not tacked on the end.  Documentation and examples are written when the API they cover is fresh, not as an afterthought.
+
 ## Phase 0: `protocol/mux` -- multiplexed I/O framing
 
 ### ~~Task 1 -- Mux layer: transparent buffered I/O~~
@@ -14,15 +16,18 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 **Files:** `protocol/mux/mux.go`, `protocol/mux/mux_test.go`
 
-**API:** Per [api-design.md](api-design.md) -- `Reader` (Read, RecvMsg, ReadDataChunk), `Writer` (Write, Flush, SendMsg), exported message code constants.
+**API:** Per [api-design.md](api-design.md) -- `Reader` (Read, RecvMsg, ReadDataChunk), `Writer` (Write, Flush, SendMsg, SetBufferSize), exported message code constants.
 
 **Key details:**
 
 - Frame header: `((MPLEX_BASE + msgCode) << 24) | length` as little-endian uint32
 - `Writer.Write()` accumulates raw bytes; `Writer.Flush()` sends MSG_DATA frame(s)
+- `Writer` buffer is bounded by configured size (default 32KB); `Write()` auto-flushes when full, keeping memory bounded and ensuring incremental delivery to the remote end
+- `Writer.SetBufferSize()` adjusts the limit; 0 disables auto-flush (unbounded)
 - `Writer.SendMsg()` flushes pending data before sending control message
 - `Reader.Read()` transparently fetches MSG_DATA frames
 - `Reader.RecvMsg()` reads non-DATA messages, skipping MSG_DATA data
+- `Reader.ReadDataChunk()` reads a single MSG_DATA frame payload (for verifying frame boundaries)
 - Buffer size: 32KB matching upstream's `IO_BUFFER_SIZE`
 - Message code constants exported (MsgData, MsgSuccess, MsgError, etc.)
 
@@ -33,6 +38,8 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 - Verify SendMsg flushes pending data before sending control message
 - Verify Read transparently spans multiple MSG_DATA frames
 - Verify RecvMsg correctly skips MSG_DATA data
+- Verify auto-flush: large Write produces multiple MSG_DATA frames via ReadDataChunk
+- Verify SetBufferSize(0) disables auto-flush (buffer grows unbounded until explicit Flush)
 - Edge cases: zero writes, buffer exactly at limit, split reads across frames
 
 ## Phase 1: `protocol` -- low-level wire protocol
@@ -383,9 +390,24 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 - Root mode: ReadDir on root does live #list call (fresh connection)
 - Root mode: entering a module directory opens separate connection to that module
 
+### Task 17 -- Example functions
+
+**Goal:** Add `ExampleXXX` Go testing functions that demonstrate how to create and use a TCP-based rsync `Server` and `Client`.  Written now while the API is fresh.
+
+**Files:** `example_test.go`
+
+**Key details:**
+
+- `ExampleServer` -- create a `Server` with modules backed by `fs.MapFS`, listen on a TCP socket, call `HandleConnection` in a goroutine per connection
+- `ExampleClient` -- create a `Client` with `ConnectFunc` that dials TCP, connect to the server, use `Session.Open` to read files and list directories
+- `ExampleClientRootMode` -- create a `Client` with empty Module (root mode), use `OpenRoot()`, list available modules via `Session.Open(".")`, then open files within specific modules
+- Examples should be self-contained: start the server, connect the client, verify a file transfer, clean up
+- Use `net.Listen`/`net.Dial` for TCP (not `io.Pipe` which is only for unit tests)
+- Demonstrate auth flow with `PasswordAuth` and `AuthCallback`
+
 ## Phase 4: Integration & Polish
 
-### Task 17 -- Cross-implementation tests
+### Task 18 -- Cross-implementation tests
 
 **Goal:** Integration tests connecting Client directly to Server through `net.Pipe()` with embedded test fixtures. Run `testing/fstest.TestFS` as additional validation.
 
@@ -399,7 +421,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 - Empty directories handled without errors
 - Run `testing/fstest.TestFS` against Client+Server pair
 
-### Task 18 -- Upstream rsync integration tests
+### Task 19 -- Upstream rsync integration tests
 
 **Goal:** Tests that connect our library to the real `rsync` binary. Skipped with `-short` or when `rsync` is not found.
 
@@ -417,7 +439,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 **Process management:** All started rsync processes must be killed on test completion. No orphans.
 
-### Task 19 -- Multi-version upstream integration tests
+### Task 20 -- Multi-version upstream integration tests
 
 **Goal:** Integration tests that connect our library against each binary in `.upstream/old_versions/` (rsync 2.6.0 through 3.4.1, covering protocol versions 27, 30, 31, 32). Skipped with `-short` or when specific binaries are missing.
 
@@ -438,7 +460,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 **Binary discovery:** Scan `.upstream/old_versions/` for `rsync_*` binaries at test time; skip any not found.
 
-### Task 20 -- Protocol version coverage
+### Task 21 -- Protocol version coverage
 
 **Goal:** Systematic unit tests across the supported protocol version range (20-32). Verify negotiation, encoding differences, and feature gates work correctly per version.
 
