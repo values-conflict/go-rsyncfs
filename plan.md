@@ -6,418 +6,25 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 **No "Known Gaps" allowed.**  If a task is incomplete, its title is not strikethrough.  If implementation reveals the plan is wrong, update the plan.  If a feature is out of scope for a task, split the task.  Never document a gap as accepted debt -- either finish the work or leave the task unmarked.
 
-## Phase 0: Foundation
+## Phase 0: `protocol/mux` -- multiplexed I/O framing
 
-### ~~Task 1 -- Multiplexed I/O layer (`protocol/mux/`)~~
+### ~~Task 1 -- Mux layer: transparent buffered I/O~~
 
-**Goal:** Implement the binary multiplexed framing protocol as a standalone sub-package.  This is genuinely reusable (any rsync implementation needs it) and cleanly separable from Client/Server logic.
+**Goal:** Implement the binary multiplexed framing protocol as a standalone sub-package with transparent buffered I/O matching upstream's iobuf model.
 
 **Files:** `protocol/mux/mux.go`, `protocol/mux/mux_test.go`
 
-**API sketch:**
-
-```go
-// Writer wraps an io.Writer with multiplexed frame encoding.
-type Writer struct{ w io.Writer }
-
-func (w *Writer) WriteMsg(code uint8, payload []byte) error
-func (w *Writer) Close() error // flush any buffered data
-
-// Reader reads multiplexed frames from an io.Reader.
-type Reader struct{ r io.Reader }
-
-func (r *Reader) ReadMsg() (code uint8, payload []byte, err error)
-```
+**API:** Per [api-design.md](api-design.md) -- `Reader` (Read, RecvMsg, ReadDataChunk), `Writer` (Write, Flush, SendMsg), exported message code constants.
 
 **Key details:**
 
-- Frame header: `((MPLEX_BASE + msgCode) << 24) | length` where MPLEX_BASE=7.  Written as a **little-endian** uint32 on the wire (confirmed from upstream source via `SIVAL()` in `byteorder.h`).
-- Payload length in bits 23-0 (max ~16MB frames)
-- Message codes defined as constants matching upstream `enum msgcode`
-
-**Tests:**
-
-- Round-trip all message types through `io.Pipe()`
-- Verify frame header encoding/decoding matches spec exactly
-- Edge cases: zero-length payload, max-size payload, truncated headers
-
-### ~~Task 2 -- Integer wire encodings (`protocol/wireint.go`)~~
-
-**Goal:** Implement the variable-length integer formats used in protocol ≥ 30 (varint, varlong) and legacy longint for older protocols.
-
-**Files:** `protocol/wireint.go`, `protocol/wireint_test.go`
-
-**API sketch:**
-
-```go
-func WriteVarint(w io.Writer, v int32) error
-func ReadVarint(r io.Reader) (int32, error)
-func WriteVarlong(w io.Writer, v int64, minBytes byte) error
-func ReadVarlong(r io.Reader, minBytes byte) (int64, error)
-```
-
-**Key details:**
-
-- All integer encodings in rsync use **little-endian** on the wire (confirmed from upstream `SIVAL()`/`SIVAL64()` macros).
-- Varint encoding is used for protocol ≥ 30 and supports values up to 2^31 - 1
-- Varlong encoding provides support for larger 64-bit values
-- Legacy longint format handles older protocols that don't have variable-length encodings
-
-**Tests:**
-
-- Round-trip all values across the full range of each encoding
-- Verify wire format matches upstream source code exactly
-- Cross-check: varint(0), varint(-1), varint(max-int32), etc produce expected byte sequences
-- Error handling for malformed encoded data
-
-### ~~Task 3 -- Greeting exchange (`protocol/greet.go`)~~
-
-**Goal:** Implement Phase 1 of the rsync daemon protocol (text-based greeting negotiation).
-
-**Files:** `protocol/greet.go`, `protocol/greet_test.go`
-
-**API sketch:**
-
-```go
-type Greeting struct {
-	Version     int
-	SubProtocol byte
-	Digests     []string // e.g. ["md5", "md4"]
-}
-
-func ParseGreeting(line string) (*Greeting, error)
-func (g *Greeting) String() string // formats back to "@RSYNCD: V.S d1 d2\n"
-
-// Negotiate picks the best common version and digest between two greetings.
-func Negotiate(local, remote Greeting) (version int, subProtocol byte, digest string, err error)
-```
-
-**Tests:**
-
-- Parse standard greeting formats (e.g. `@RSYNCD: 32.0 md5 md4\n`)
-- Negotiation matrix: client v32 + server v30 → pick v30 with correct digest fallback
-- Subprotocol mismatch causes version downgrade
-- Error on malformed greeting lines
-
-## Phase 1: Server (read-only, single module)
-
-### ~~Task 4 -- Server struct & `@ERROR` handling (`server.go`)~~
-
-**Goal:** Define the `Server` type and implement error response formatting.  This establishes the server's basic shape before any protocol logic.
-
-**Files:** `server.go`, `server_test.go`
-
-**API sketch:**
-
-```go
-type Server struct {
-	// modules maps module name to its config + backing FS
-	modules map[string]*ServerModule
-}
-
-type ServerModule struct {
-	Name     string
-	Comment  string
-	FS       fs.FS
-	ReadOnly bool
-}
-
-// NewServer constructs a Server with the given modules.
-func NewServer(mods ...*ServerModule) (*Server, error)
-```
-
-**Key Details:**
-
-- Server wraps local io/fs.FS and serves it over rsync protocol, but does NOT directly implement fs.FS interface in normal operation
-- In root mode scenarios with multiple modules, the server may need to provide virtual filesystem access (but this is a special case)
-- Error response formatting follows @ERROR: line format exactly as specified upstream
-- Constructed via `NewServer` with variadic modules -- all modules known at construction time
-
-**Tests:**
-
-- Adding/removing modules, duplicate name rejection
-- `@ERROR:` line formatting matches upstream format exactly
-
-### ~~Task 5 -- Server: full handshake (`server-handshake.go`)~~
-
-**Goal:** Implement the server-side connection handling: greeting exchange → module selection → auth (if configured) → argument parsing → file list → file data transfers.  `HandleConnection` runs the full protocol lifecycle on a single connection.
-
-**Files:** `server-handshake.go`, `server-handshake_test.go`
-
-**API sketch:**
-
-```go
-// HandleConnection runs the full rsync protocol on a single connection: handshake (Phases 1-4), file list transfer, and file data transfers.
-//
-// If opts.LocalGreeting is the zero value, defaults are applied (version 32, subprotocol 0, digests ["md5", "md4"]).
-func (s *Server) HandleConnection(rw io.ReadWriter, opts HandleOptions) error
-
-type HandleOptions struct {
-	LocalGreeting Greeting                                                // what version/digests we advertise
-	AuthCallback  func(username string, challenge []byte) ([]byte, error) // nil = no auth required
-}
-```
-
-**Tests:**
-
-- Full handshake round-trip through `io.Pipe()` with a hand-written client greeting/module request
-- Module listing (`#list`) returns correct tab-separated format + EXIT terminator
-- Unknown module → `@ERROR: Unknown module`
-- Auth challenge/response flow (with and without callback)
-- Argument parsing: null-terminated (proto ≥ 30) vs newline-terminated
-- Compat flags exchange: server parses `-e` argument, sends resolved flags as varint (proto ≥ 30)
-
-### ~~Task 6 -- Server: file list generation (`server-flist.go`)~~
-
-**Goal:** Walk the backing FS and emit a file list in rsync wire format.  This is the server-side equivalent of `send_files()` for the listing phase.
-
-**Files:** `server-flist.go`, `server-flist_test.go`
-
-**API sketch:**
-
-```go
-// sendFileList walks rootFS starting at basePath and writes entries to w.
-// varintFlistFlags enables varint xflags encoding when CF_VARINT_FLIST_FLAGS is negotiated.
-func sendFileList(w *mux.Writer, rootFS fs.FS, basePath string, version int, varintFlistFlags bool) error
-```
-
-**Key details:**
-
-- Xmit flags encoding: varint when `CF_VARINT_FLIST_FLAGS` is negotiated via compat exchange (introduced in v32-era rsync), otherwise byte+extended for ≥ 28 or single byte < 28
-- Delta-encoded: mode/uid/gid/mtime/name reuse previous values when same
-- End-of-list marker (`NDX_DONE` = -1) with compressed NDX encoding for proto ≥ 30
-
-**Tests:**
-
-- Walk a simple in-memory FS (use `testing/fstest.MapFS`) and verify wire output byte-for-byte against expected format
-- Xmit flag reuse: consecutive files with same mode/uid/gid/mtime should skip those fields
-- Symlink entries encode target correctly
-- Empty directory produces correct end-of-list marker
-
-### ~~Task 7 -- Server: file data transfer (`server-transfer.go`)~~
-
-**Goal:** Implement the server-side data sender: given a file, compute block checksums and handle delta requests from the client.  This is the core of rsync's efficient transfer algorithm.
-
-**Files:** `server-transfer.go`, `server-transfer_test.go`
-
-**API sketch:**
-
-```go
-// sendFile sends one file via the multiplexed I/O layer using rsync's block checksum protocol.
-// Takes both reader and writer because the server must read the delta stream from the client.
-func sendFile(r *mux.Reader, w *mux.Writer, f fs.File, version int) error
-```
-
-**Key details:**
-
-- Compute SumHead (block count, block length, remainder, checksum lengths)
-- Send rolling checksums (sum1 = Adler-like, sum2 = MD4/MD5 depending on negotiated digest)
-- Read delta map from client and transmit only mismatched blocks
-- Send `MSG_SUCCESS` with file index when done
-- **Role:** In this read-only FS context, the server acts as the *Sender* in rsync's terminology (providing data to a receiver).  The `r *mux.Reader` parameter is required because the server must read the delta stream from the client to know which blocks to send
-
-**Tests:**
-
-- Full transfer of a known file through mux via io.Pipe() -- verify checksums match
-- Zero-byte file (count=0, no data sent)
-- File that matches perfectly on receiver side (no gaps to fill)
-- File that differs entirely (all blocks transmitted)
-
-## Phase 2: Client (`io/fs.FS` implementation)
-
-### ~~Task 8 -- Client struct & connection setup (`client.go`)~~
-
-**Goal:** Define the `Client` type and implement connection establishment + handshake from the client side.  This mirrors Task 5 but in reverse direction.
-
-**Files:** `client.go`, `client_test.go`
-
-**API sketch:**
-
-```go
-type Client struct {
-	Module       string  // module name ("" for root mode)
-	Greeting     protocol.Greeting
-	AuthUser     string
-	AuthResponse func(digest string, challenge []byte) ([]byte, error)
-	ConnectFunc  func(moduleName string) (io.ReadWriter, error)
-}
-
-// construct directly: &Client{Module: "mymod", ...}
-// zero-value fields use defaults applied lazily in Connect/OpenRoot
-
-// Connect runs the handshake and returns an active session ready for FS operations.
-// If rw is nil and ConnectFunc is set, ConnectFunc creates the connection.
-func (c Client) Connect(rw io.ReadWriter) (*Session, error) // value receiver -- Client is a plain config struct
-
-// OpenRoot returns a Session for root mode (modules as top-level dirs).
-func (c Client) OpenRoot() (*Session, error)
-
-// PasswordAuth returns an AuthResponse function for the standard password+challenge digest flow.
-func PasswordAuth(password string) func(digest string, challenge []byte) ([]byte, error)
-
-type Session struct {
-	client      *Client
-	rw          io.ReadWriter // live connection (nil in root mode)
-	muxReader   *mux.Reader   // nil in root mode
-	muxWriter   *mux.Writer   // nil in root mode
-	version     int
-	digest      string
-	moduleName  string
-	connectFunc func(string) (io.ReadWriter, error) // for root mode
-	prevNdx     int32 // tracks previous positive NDX for compressed delta encoding
-}
-```
-
-**Key Details:**
-
-- `Client` is a plain config struct -- no constructor, no separate ClientConfig type
-- `Session` (not `Client`) implements `io/fs.FS` to present remote filesystem as local
-- `Connect()` accepts nil `rw` when `ConnectFunc` is set -- creates the connection automatically
-- `Connect` uses a **value receiver** (not pointer) since `Client` is an immutable config struct
-- **`PasswordAuth` helper:** convenience function that returns an `AuthResponse` for standard password+challenge digest flow (md4 via `golang.org/x/crypto/md4`, md5 via `crypto/md5`)
-- **Root mode is NOT part of Task 8.**  The `#list` protocol call closes the server connection (verified against upstream), so root mode cannot use a single persistent connection.  It requires a separate approach (see Task 9).
-
-**Tests:**
-
-- Client connects to our Server (Task 5) through `io.Pipe()` -- full handshake round-trip
-- Version negotiation works correctly in both directions
-- Module listing via client returns expected results
-- `Connect(nil)` with `ConnectFunc` creates connection automatically
-- `Connect(nil)` without `ConnectFunc` returns error
-- Auth hash computation: `PasswordAuth` produces correct md4/md5 digests
-- Compat flags: client sends `-e` argument with feature flags, reads server's compat flags varint
-
-### ~~Task 9 -- Client: `Open` implementation + root mode (`client-open.go`)~~
-
-**Goal:** Implement `fs.FS.Open` for the client side.  Opening a file triggers the server-side data transfer protocol (Tasks 6 + 7).  Also rearchitect root mode to handle the fact that `#list` closes the connection.
-
-**Files:** `client-open.go`, `client-open_test.go`
-
-**API sketch:**
-
-```go
-func (s *Session) Open(name string) (fs.File, error)
-```
-
-**Key Details:**
-
-- Client's fs.FS implementation provides access to remote filesystem via rsync protocol
-- For directories: request file list from server, parse wire format into directory entries and return fs.File implementing ReadDirFile interface
-- For regular files: trigger data transfer protocol -- send checksum header, read delta map and data blocks through mux layer
-- The returned `fs.File` implements both `Read()` (for regular files) and `Readdir()` (for directories)
-- Symlinks are handled by returning appropriate Mode() flags with target information when available
-- **Metadata Mapping:** Map rsync wire-format modes and permissions back to Go `os.FileMode`
-- **Root mode:** Since `#list` closes the server connection (verified against upstream), root mode cannot use a single persistent connection.  `Session` in root mode acts as a config holder (connection params, not a live socket).  `ReadDir` on root opens a fresh connection, sends `#list`, reads modules, and closes.  `Open` on a module path opens a fresh connection to that specific module.  Each FS operation gets its own connection.
-- **`OpenRoot` does no greeting probe:** every FS operation already opens a fresh connection with a full greeting exchange, so a separate probe would be a redundant round-trip.
-- **Flist reader supports both byte and varint xflags:** `flistReader.readXflags` handles varint encoding when `CF_VARINT_FLIST_FLAGS` is negotiated via the compat flags exchange.
-
-**Tests:**
-
-- Open a file served by our Server → content matches exactly
-- Open a directory → ReadDir returns correct entries with FileInfo
-- Symlink: Open resolves correctly, fs.ReadLink works if available
-- Error cases: non-existent path, permission denied from server side
-- Root mode: `ReadDir` on root does a live `#list` call (fresh connection each time)
-- Root mode: entering a module directory opens a separate connection to that module
-- Flist reader: varint xflags decoded correctly when `CF_VARINT_FLIST_FLAGS` is negotiated
-
-### ~~Task 10 -- Cross-implementation tests (`cross_test.go`)~~
-
-**Goal:** Integration tests connecting Client directly to Server through `io.Pipe()` with embedded test fixtures.  Run `testing/fstest.TestFS` as additional validation.
-
-**Files:** `cross_test.go`, plus any fixture files under `testdata/`
-
-**Tests:**
-
-- Full directory tree transfer: create a MapFS on server, open via client, verify all content matches byte-for-byte
-- Symlinks preserved through the protocol
-- Large file (> block size) transfers correctly with delta algorithm
-- Empty directories handled without errors
-- Run `testing/fstest.TestFS` against our Client+Server pair
-
-## Phase 3: Integration & Polish
-
-### ~~Task 11 -- Upstream rsync integration tests (`integration_test.go`)~~
-
-**Goal:** Tests that connect our library to the real `rsync` binary.  Skipped with `-short` or when `rsync` is not found.
-
-**Files:** `integration_test.go`
-
-**Tests (client-side):**
-
-- Start `rsync --daemon`, connect our Client, verify FS operations match expectations
-- Use Unix sockets if possible to avoid port management
-
-**Tests (server-side):**
-
-- Our Server behind a stream, driven by real `rsync` client binary
-- Verify transfers work correctly in both directions (pull from server)
-
-**Process management:** All started rsync processes must be killed on test completion.  No orphans.
-
-### Task 12 -- Protocol version coverage (`version_test.go`)
-
-**Goal:** Systematic tests across the supported protocol version range (20-32).  Verify that negotiation, encoding differences, and feature gates work correctly per version.
-
-**Files:** `version_test.go`
-
-**Tests:**
-
-- Matrix: client@vN × server@vM → correct negotiated version for all pairs in [20..32]
-- Version-specific wire format tests (e.g., varint only appears ≥ 30, extended xflags ≥ 28)
-- Fallback behavior when features are unavailable at lower versions
-
-### ~~Task 13 -- Transparent mux buffering (`protocol/mux/`)~~
-
-**Goal:** Add transparent buffered I/O to the mux layer, matching upstream's iobuf model.  This enables correct upstream rsync interop by allowing multiple protocol writes to be batched into single mux frames, and presenting a transparent byte stream to readers.
-
-**Files:** `protocol/mux/mux.go`, `protocol/mux/mux_test.go`
-
-**Background:** Upstream rsync's iobuf layer has two separate output paths: `iobuf.out` for MSG_DATA (transparently buffered, 32KB default) and `iobuf.msg` for non-DATA messages (sent as separate frames).  Application code calls `write_buf()`/`read_buf()` and never sees mux headers -- the iobuf layer transparently batches writes into MSG_DATA frames and unwraps them on reads.  Our current explicit-frame API (`WriteMsg`/`ReadMsg`) cannot handle upstream's batching behavior, causing protocol desync when the real rsync client batches selector + sum_head in one frame.
-
-**API sketch:**
-
-```go
-// Writer supports both buffered (transparent) and explicit message writes.
-type Writer struct {
-    w   io.Writer
-    buf bytes.Buffer  // accumulates raw writes for batching (32KB default)
-}
-
-// Write accumulates raw bytes.  They will be sent as MSG_DATA on Flush().
-// This matches upstream's write_buf() behavior.
-func (w *Writer) Write(p []byte) (n int, err error)
-
-// Flush sends accumulated data as MSG_DATA frame(s).
-// Called automatically before SendMsg to ensure ordering.
-func (w *Writer) Flush() error
-
-// SendMsg sends a non-DATA message (MSG_SUCCESS, MSG_ERROR, etc.).
-// Flushes any pending buffered data first, matching upstream's send_msg().
-func (w *Writer) SendMsg(code uint8, payload []byte) error
-
-// Reader supports both buffered (transparent) and explicit message reads.
-type Reader struct {
-    r   io.Reader
-    buf bytes.Buffer  // accumulated payload from MSG_DATA frames
-}
-
-// Read from the transparent buffer.  Fetches more MSG_DATA frames as needed.
-// This matches upstream's read_buf() behavior.
-func (r *Reader) Read(p []byte) (n int, err error)
-
-// RecvMsg reads a non-DATA message.  Skips any pending MSG_DATA data.
-func (r *Reader) RecvMsg() (code uint8, payload []byte, err error)
-```
-
-**Key details:**
-
-- Buffer size: 32KB (`IO_BUFFER_SIZE` in upstream), matching upstream's default
-- `Write()` accumulates raw bytes; `Flush()` sends them as MSG_DATA frame(s)
-- `SendMsg()` automatically flushes pending buffered data first (ensures MSG_DATA before control messages)
-- `Read()` transparently fetches MSG_DATA frames as the buffer drains
-- `RecvMsg()` reads non-DATA frames, skipping any pending MSG_DATA payload
-- `ReadDataChunk()` reads a single MSG_DATA frame payload (for bounded reads like file lists)
+- Frame header: `((MPLEX_BASE + msgCode) << 24) | length` as little-endian uint32
+- `Writer.Write()` accumulates raw bytes; `Writer.Flush()` sends MSG_DATA frame(s)
+- `Writer.SendMsg()` flushes pending data before sending control message
+- `Reader.Read()` transparently fetches MSG_DATA frames
+- `Reader.RecvMsg()` reads non-DATA messages, skipping MSG_DATA data
+- Buffer size: 32KB matching upstream's `IO_BUFFER_SIZE`
+- Message code constants exported (MsgData, MsgSuccess, MsgError, etc.)
 
 **Tests:**
 
@@ -428,61 +35,398 @@ func (r *Reader) RecvMsg() (code uint8, payload []byte, err error)
 - Verify RecvMsg correctly skips MSG_DATA data
 - Edge cases: zero writes, buffer exactly at limit, split reads across frames
 
-## Protocol Version Coverage & Testing Strategy
+## Phase 1: `protocol` -- low-level wire protocol
 
-### Detailed Protocol Support Requirements:
+### ~~Task 2 -- Protocol constants~~
 
-1. **Version Range**: Full support for protocol versions 20 through 32 (with forward-compatibility to MAX_PROTOCOL_VERSION 40)
+**Goal:** Define all protocol-level constants and version gates in the `protocol` package.
 
-2. **Key Differences by Version**:
+**Files:** `protocol/constants.go`
 
-   - Versions < 28: Single byte xmit flags, basic file list encoding
-   - Versions 28-31: Extended xmit flag format with additional metadata fields
-   - Versions ≥ 30: Varint/varlong encodings (varints for counts/indices, varlongs for file sizes/timestamps) instead of fixed-width integers
-   - Compat flag negotiation (`CF_VARINT_FLIST_FLAGS`): when both sides advertise support via client_info string, xmit flags use varint encoding regardless of major protocol version; introduced in v32-era rsync
+**API:** Per [api-design.md](api-design.md) -- protocol version constants (Min, Old, Current, Max), compat flag bits (CF_INC_RECURSE through CF_ID0_NAMES), IO error constants (IOERRGeneral, IOERRVanished, IOERRDelLimit, IOERRValidMask), xmit flag bits (XMIT_TOP_DIR through XMIT_CRTIME_EQ_MTIME), item flag bits (ITEM_REPORT_ATIME through ITEM_MATCHED), special NDX values (NDX_DONE, NDX_FLIST_EOF).
 
-3. **Version Negotiation Testing**:
+**Tests:**
 
-   - Matrix testing: client@vN × server@vM → correct negotiated version for all pairs in [20..32]
-   - Fallback behavior when features are unavailable at lower versions
-   - Proper handling of unsupported protocol combinations (should downgrade gracefully)
+- Verify constant values match upstream source
+- Verify IOERRValidMask covers exactly the defined bits
 
-### Comprehensive Testing Strategy:
+### ~~Task 3 -- Integer wire encodings~~
 
-1. **Cross-Implementation Tests**:
+**Goal:** Implement variable-length integer formats (varint, varlong) for protocol ≥ 30, legacy longint for older protocols, fixed-width integers, and compressed NDX stateful encoding.
 
-   - Client directly connected to Server instances using `io.Pipe()`
-   - Embedded test fixtures with known file content for byte-for-byte verification
-   - Integration testing across all supported versions
-   - Run `testing/fstest.TestFS` against our Client+Server pair as additional validation layer
+**Files:** `protocol/wireint.go`, `protocol/wireint_test.go`
 
-2. **Edge Case Testing**:
+**API:** Per [api-design.md](api-design.md) -- WriteVarint/ReadVarint, WriteVarlong/ReadVarlong, WriteLongInt/ReadLongInt, WriteInt32/ReadInt32, WriteUint16/ReadUint16, NdxState with WriteNdx/ReadNdx.
 
-   - Malformed greeting lines in handshake process
-   - Authentication failures and credential handling
-   - Invalid module names or access attempts
-   - Empty files, zero-length directories, symlinks with various targets
-   - Protocol version mismatches during negotiation
+**Key details:**
 
-3. **Error Handling Consistency**:
+- All multi-byte integers are little-endian
+- Varint uses `int_byte_extra[]` lookup table (64 entries, indexed by first_byte/4)
+- Compressed NDX: stateful delta encoding with prev_positive/prev_negative trackers; NDX_DONE = single byte 0x00
 
-   - All error messages must exactly match upstream rsync format for interoperability
-   - Error codes and prefixes should be identical (e.g., `@ERROR:` prefix)
-   - Use of "comma ok" idiom throughout for safe map lookups, type assertions
-   - Proper wrapping of errors with context using `%w` verb to enable error unwrapping via `errors.Is`
+**Tests:**
 
-4. **Integration Testing**:
+- Round-trip all values across full range of each encoding
+- Varint: 0, -1, max-int32, min-int32 produce expected byte sequences
+- Compressed NDX: sequential indices encode efficiently, NDX_DONE = 0x00
+- Cross-check wire format against upstream source code
 
-   - Tests against real rsync binary when available (skipped with `-short` or if not found)
-   - Server behind a stream driven by real rsync client for both pull and push scenarios
-   - Client connecting to actual daemon processes started during tests
-   - Process management requirements: all started rsync processes must be killed on test completion
+### ~~Task 4 -- Greeting exchange~~
 
-## Future Phases (not yet planned into tasks)
+**Goal:** Implement the text-based greeting negotiation: parsing, formatting, defaults, and version/digest negotiation.
 
-These are noted from goals.md but deferred until Phase 1-3 are complete:
+**Files:** `protocol/greet.go`, `protocol/greet_test.go`
 
-- **Writability:** bidirectional transfers (push files to server, accept pushes on server)
-- **Caching / partial transfer:** delta-transfer resume with cache layer
-- **Compression:** `--compress` equivalent
-- **Extended metadata:** hardlinks, ACLs, xattrs, nanosecond timestamps, device files
+**API:** Per [api-design.md](api-design.md) -- `Greeting` struct (Version, SubProtocol, Digests), `ParseGreeting`, `Greeting.String`, `Greeting.ApplyDefaults`, `Negotiate(client, server Greeting)`.
+
+**Key details:**
+
+- Format: `@RSYNCD: <version>.<sub> <digest1> <digest2>...`
+- ApplyDefaults: version → 32, subProtocol → 0, Digests → ["md5", "md4"]
+- Negotiate: pick lower version, subprotocol mismatch causes downgrade, digest negotiation follows client preference
+
+**Tests:**
+
+- Parse standard greeting formats
+- Negotiation matrix: client v32 + server v30 → v30 with correct digest
+- Subprotocol mismatch causes version downgrade
+- ApplyDefaults fills zero-value fields idempotently
+
+### Task 5 -- vstring encoding
+
+**Goal:** Implement vstring (length-prefixed string) encoding used in the wire protocol.
+
+**Files:** `protocol/vstring.go`, `protocol/vstring_test.go`
+
+**API:** Per [api-design.md](api-design.md) -- `WriteVstring(w io.Writer, s string)`, `ReadVstring(r io.Reader) (string, error)`.
+
+**Key details:**
+
+- Format: `length : uint8` (or 2 bytes if high bit set) + `data : raw[length]`
+- If `len & 0x80`: actual length = `(len & 0x7F) * 256 + next_byte`
+
+**Tests:**
+
+- Round-trip strings of various lengths (0, 1, 127, 128, 255, 256, 32767)
+- Verify wire format: short strings use 1-byte length, long strings use 2-byte length
+- Empty string round-trips correctly
+
+### Task 6 -- Checksum algorithms
+
+**Goal:** Implement rsync's rolling checksum (checksum1), strong hash (checksum2), and SumHead wire format.
+
+**Files:** `protocol/checksum.go`, `protocol/checksum_test.go`
+
+**API:** Per [api-design.md](api-design.md) -- `Checksum1(data []byte) uint32`, `Checksum2(data []byte, digest string, s2Length int, seed int32, seedFix bool) []byte`, `SupportedDigests() []string`, `SumHead` struct with `WriteSumHead`/`ReadSumHead`.
+
+**Key details:**
+
+- Checksum1: Adler-32-inspired rolling checksum, returns 4-byte LE result
+- Checksum2: strong hash with seed; seedFix controls order (seed+data vs data+seed)
+- SupportedDigests: returns list of algorithms this library supports
+- SumHead: count, blength, s2length (proto ≥ 27), remainder -- all int32 LE
+
+**Tests:**
+
+- Checksum1: verify against known test vectors from upstream
+- Checksum2: verify MD4, MD5 with both seed orders
+- SumHead: round-trip with and without s2length (proto < 27 vs ≥ 27)
+- Empty file (count=0) produces correct SumHead
+
+### Task 7 -- Delta stream
+
+**Goal:** Implement the delta stream format: streaming API (DeltaWriter/DeltaReader) for hot-path transfer and batch API (ParseDeltaStream/WriteDeltaStream) for testing and tools.
+
+**Files:** `protocol/delta.go`, `protocol/delta_test.go`
+
+**API:** Per [api-design.md](api-design.md) -- `DeltaWriter` (WriteLiteral, WriteMatch, WriteEnd), `DeltaReader` (ReadToken), `DeltaToken` struct, `ParseDeltaStream`, `WriteDeltaStream`.
+
+**Key details:**
+
+- Literal token: `0x01` prefix + length + data
+- Match token: `0x00` prefix + 4-byte LE block index
+- End marker: `0xFF`
+- Batch functions implemented on top of streaming ones
+
+**Tests:**
+
+- Round-trip delta streams through io.Pipe()
+- Mixed literal and match tokens
+- Empty delta stream (just end marker)
+- Large literal data
+- Batch API matches streaming API output
+
+### Task 8 -- File list I/O
+
+**Goal:** Implement file list entry wire format with delta-encoded xmit flags, supporting all protocol versions (20-32) and both byte and varint xflags encoding.
+
+**Files:** `protocol/flist.go`, `protocol/flist_test.go`
+
+**API:** Per [api-design.md](api-design.md) -- `FlistEntry` struct, `FlistReader` (NewFlistReader, ReadEntry), `FlistWriter` (NewFlistWriter, WriteEntry, WriteEndMarker).
+
+**Key details:**
+
+- Xmit flags encoding: varint when CF_VARINT_FLIST_FLAGS, byte/shortint for proto 28+, single byte for proto < 28
+- Delta-encoded fields: mode, uid, gid, mtime, name reuse previous values when same
+- End-of-list: xflags=0 + NDX_DONE (compressed for proto ≥ 30)
+- Protocol version gates: mod_nsec (≥ 31), hlink_ndx (≥ 30), long_name, etc.
+
+**Tests:**
+
+- Round-trip file entries with various modes (regular, directory, symlink, device)
+- Xmit flag reuse: consecutive files with same attributes skip fields
+- Varint xflags decoded correctly when CF_VARINT_FLIST_FLAGS set
+- End-of-list marker correctly terminates reading
+- Protocol version differences: proto 27 vs 30 vs 31 wire format
+
+### Task 9 -- Selector wire format
+
+**Goal:** Implement the selector (file transfer request) wire format used in the selector loop.
+
+**Files:** `protocol/selector.go`, `protocol/selector_test.go`
+
+**API:** Per [api-design.md](api-design.md) -- `Selector` struct (Ndx, Iflags, BasisType, Xname), `ReadSelector(r io.Reader, ndx *NdxState, version int)`, `WriteSelector(w io.Writer, ndx *NdxState, version int, sel *Selector)`.
+
+**Key details:**
+
+- Proto ≥ 30: compressed NDX via NdxState
+- Proto < 30: int32 LE for NDX
+- Proto ≥ 29: iflags as uint16 LE
+- Proto < 29: iflags defaults to ITEM_TRANSFER | ITEM_MISSING_DATA
+- Optional fields: BasisType (if ITEM_BASIS_TYPE_FOLLOWS), Xname (if ITEM_XNAME_FOLLOWS)
+
+**Tests:**
+
+- Round-trip selectors with various iflags combinations
+- Compressed NDX state tracking across multiple selectors
+- Proto version differences: selector format at proto 28 vs 30 vs 32
+
+### Task 10 -- Argument parsing
+
+**Goal:** Implement rsync command-line argument reading/writing and client_info feature flag extraction.
+
+**Files:** `protocol/args.go`, `protocol/args_test.go`
+
+**API:** Per [api-design.md](api-design.md) -- `ReadArgs(r io.Reader, version int) ([]string, error)`, `WriteArgs(w io.Writer, args []string, version int) error`, `ExtractClientInfo(args []string) string`, `ResolveCompatFlags(serverCaps int, clientInfo string) int`.
+
+**Key details:**
+
+- Proto ≥ 30: null-terminated arguments
+- Proto < 30: newline-terminated arguments
+- Double delimiter (null or newline) terminates the list
+- First arg is always "."
+- `e` flag contains client_info feature flags (letters like i, L, s, f, x, C, I, v, u)
+- ResolveCompatFlags maps client_info letters to compat flag bits
+
+**Tests:**
+
+- Round-trip argument lists for both null and newline formats
+- ExtractClientInfo correctly parses -e argument
+- ResolveCompatFlags maps feature letters to correct flag bits
+- Empty argument list (just ".")
+
+### Task 11 -- Handshake primitives
+
+**Goal:** Implement building blocks for the full handshake: greeting I/O, module selection, authentication, compat flags, algorithm negotiation, and error parsing.
+
+**Files:** `protocol/handshake.go`, `protocol/handshake_test.go`
+
+**API:** Per [api-design.md](api-design.md) -- `ReadGreeting`/`WriteGreeting`, `ReadModuleRequest`, `WriteModuleList`/`ModuleInfo`, `ReadAuthChallenge`/`WriteAuthChallenge`, `WriteAuthOK`, `ReadAuthResponse`/`WriteAuthResponse`, `ReadCompatFlags`/`WriteCompatFlags`, `Algorithms` struct, `DefaultAlgorithms`, `NegotiateAlgorithms`, `ReadChecksumSeed`/`WriteChecksumSeed`, `ParseError`/`WriteError`, `ExchangeVersion`.
+
+**Key details:**
+
+- Greeting I/O: reads/writes text greeting lines
+- Auth: base64-encoded challenge and digest
+- Compat flags: varint for proto ≥ 30, no-op for older
+- Algorithm negotiation: vstring exchange for checksums and compressions when CF_VARINT_FLIST_FLAGS set
+- DefaultAlgorithms: "md5" (proto ≥ 30) or "md4" (proto < 30), compression "zlib"
+- ParseError: checks for @ERROR: prefix, returns nil if not an error
+
+**Tests:**
+
+- Greeting round-trip through io.Pipe()
+- Auth challenge/response flow with base64 encoding
+- Algorithm negotiation: both sides pick strongest mutual choice
+- DefaultAlgorithms returns correct defaults per protocol version
+- ParseError correctly identifies @ERROR: lines
+- Compat flags exchange for proto ≥ 30
+
+## Phase 2: Server
+
+### Task 12 -- Server struct & module configuration
+
+**Goal:** Define the `Server` type with module-to-filesystem mapping and auth callback support.
+
+**Files:** `server.go`, `server_test.go`
+
+**API:** Per [api-design.md](api-design.md) -- `Server` struct (Greeting field), `NewServer(mods ...*ServerModule) (*Server, error)`, `ServerModule` struct (Name, Comment, FS, ReadOnly, AuthCallback).
+
+**Key details:**
+
+- Server is constructed once with all modules; reusable across connections
+- AuthCallback: per-module, returns expected raw digest bytes or error
+- Zero-value Greeting uses defaults (version 32, digests ["md5", "md4"])
+
+**Tests:**
+
+- NewServer with multiple modules
+- Duplicate module name rejection
+- Module lookup by name
+- AuthCallback verification flow
+
+### Task 13 -- Server: HandleConnection
+
+**Goal:** Implement the full server-side connection handling: handshake (greeting, module selection, auth, args, compat flags, algorithms, seed), file list transfer, selector loop, data transfer, final goodbye, and stats exchange.
+
+**Files:** `server-handshake.go`, `server-handshake_test.go`
+
+**API:** Per [api-design.md](api-design.md) -- `func (s *Server) HandleConnection(rw io.ReadWriter) error`.
+
+**Key details:**
+
+- Single entry point -- one call per connection, Server is stateless and reusable
+- Composes `protocol/` primitives into full handshake flow (see api-design.md composition diagram)
+- After handshake: switch to multiplexed I/O for daemon→client channel
+- Send file list, then enter selector loop
+- Selector loop: read selectors from raw connection (buffered), echo via muxWriter, send file data for TRANSFER selectors
+- Final goodbye exchange and stats exchange
+- Handshake timeout (default 60 seconds) on pre-transfer handshake
+- Peer-supplied MSG_IO_ERROR values masked against IOERRValidMask
+
+**Tests:**
+
+- Full handshake round-trip through io.Pipe() with hand-written client
+- Module listing (#list) returns correct tab-separated format + EXIT terminator
+- Unknown module → @ERROR: Unknown module
+- Auth challenge/response flow with and without callback
+- Argument parsing: null-terminated (proto ≥ 30) vs newline-terminated
+- Compat flags exchange
+- Algorithm negotiation when CF_VARINT_FLIST_FLAGS set
+
+### Task 14 -- Server: file list generation & data transfer
+
+**Goal:** Implement the server-side file list walker and file data sender: walk backing FS to emit file list in rsync wire format, compute block checksums, and handle delta requests.
+
+**Files:** `server-send.go`, `server-send_test.go`
+
+**API:** Internal helpers composed within HandleConnection.
+
+**Key details:**
+
+- Walk backing fs.FS and emit file list entries via protocol.FlistWriter
+- Xmit flags encoding: varint when CF_VARINT_FLIST_FLAGS, byte/shortint otherwise
+- For data transfer: compute SumHead, send block checksums, read delta stream from client, transmit only mismatched blocks
+- Send MSG_SUCCESS with file index when done
+- Server reads selectors from raw connection (buffered I/O) and writes data through mux layer
+
+**Tests:**
+
+- Walk a MapFS and verify file list wire output
+- Xmit flag reuse: consecutive files with same attributes skip fields
+- Full file transfer through mux: verify checksums match
+- Zero-byte file (count=0, no data sent)
+- File that matches perfectly (no gaps to fill)
+- File that differs entirely (all blocks transmitted)
+
+## Phase 3: Client
+
+### Task 15 -- Client struct & Connect
+
+**Goal:** Define the `Client` config struct and implement connection establishment + handshake from the client side. Returns a `Session` ready for FS operations.
+
+**Files:** `client.go`, `client-connect.go`, `client_test.go`
+
+**API:** Per [api-design.md](api-design.md) -- `Client` struct (Module, Greeting, AuthUser, AuthResponse, ConnectFunc), `func (c Client) Connect(rw io.ReadWriter) (*Session, error)`, `func (c Client) OpenRoot() (*Session, error)`, `func PasswordAuth(password string) func(digest string, challenge []byte) ([]byte, error)`, `Session` struct.
+
+**Key details:**
+
+- Client is a plain config struct -- no constructor, value semantics, zero-value fields use defaults
+- Connect runs full handshake (greeting, module, auth, args, compat flags, algorithms, seed) and returns Session
+- Connect accepts nil rw when ConnectFunc is set
+- OpenRoot returns Session for root mode (no live connection)
+- PasswordAuth: standard password+challenge digest flow (md4 via golang.org/x/crypto/md4, md5 via crypto/md5)
+- Session holds live connection state (muxReader, muxWriter, version, digest, etc.)
+
+**Tests:**
+
+- Client connects to Server through io.Pipe() -- full handshake round-trip
+- Version negotiation works correctly in both directions
+- Connect(nil) with ConnectFunc creates connection automatically
+- Connect(nil) without ConnectFunc returns error
+- PasswordAuth produces correct md4/md5 digests
+- Compat flags: client sends -e argument with feature flags, reads server compat flags
+
+### Task 16 -- Client: Session.Open
+
+**Goal:** Implement `fs.FS.Open` for the client side. Opening a directory reads the file list; opening a file triggers the rsync data transfer protocol.
+
+**Files:** `client-open.go`, `client-open_test.go`
+
+**API:** Per [api-design.md](api-design.md) -- `func (s *Session) Open(name string) (fs.File, error)`.
+
+**Key details:**
+
+- Session implements fs.FS (not Client)
+- For directories: read file list from server, parse with protocol.FlistReader, return directory entries
+- For regular files: send selector (ItemTransfer|ItemMissingData), read sum_head + block checksums, write delta stream, read file data, verify checksum, send MSG_SUCCESS
+- Phase exchange: send NDX_DONE after file list, read NDX_DONE from server
+- Root mode: Session acts as config holder; each Open creates fresh connection via ConnectFunc
+- Metadata mapping: rsync wire-format modes to Go os.FileMode
+- Symlinks: return appropriate Mode() flags with target information
+
+**Tests:**
+
+- Open a file served by Server → content matches exactly
+- Open a directory → ReadDir returns correct entries with FileInfo
+- Symlink: Open resolves correctly, fs.ReadLink works
+- Error cases: non-existent path, permission denied from server
+- Root mode: ReadDir on root does live #list call (fresh connection)
+- Root mode: entering a module directory opens separate connection to that module
+
+## Phase 4: Integration & Polish
+
+### Task 17 -- Cross-implementation tests
+
+**Goal:** Integration tests connecting Client directly to Server through `net.Pipe()` with embedded test fixtures. Run `testing/fstest.TestFS` as additional validation.
+
+**Files:** `cross_test.go`, `testdata/` (embedded fixtures)
+
+**Tests:**
+
+- Full directory tree transfer: MapFS on server, open via client, verify all content byte-for-byte
+- Symlinks preserved through the protocol
+- Large file (> block size) transfers correctly with delta algorithm
+- Empty directories handled without errors
+- Run `testing/fstest.TestFS` against Client+Server pair
+
+### Task 18 -- Upstream rsync integration tests
+
+**Goal:** Tests that connect our library to the real `rsync` binary. Skipped with `-short` or when `rsync` is not found.
+
+**Files:** `integration_test.go`
+
+**Tests (client-side):**
+
+- Start `rsync --daemon`, connect our Client, verify FS operations match expectations
+- Prefer Unix sockets to avoid port management
+
+**Tests (server-side):**
+
+- Our Server behind a stream, driven by real `rsync` client binary
+- Verify transfers work correctly (pull from server)
+
+**Process management:** All started rsync processes must be killed on test completion. No orphans.
+
+### Task 19 -- Protocol version coverage
+
+**Goal:** Systematic tests across the supported protocol version range (20-32). Verify negotiation, encoding differences, and feature gates work correctly per version.
+
+**Files:** `version_test.go`
+
+**Tests:**
+
+- Matrix: client@vN × server@vM → correct negotiated version for all pairs in [20..32]
+- Version-specific wire format tests (varint only ≥ 30, extended xflags ≥ 28, mod_nsec ≥ 31)
+- Fallback behavior when features unavailable at lower versions
+- Compat flag negotiation per version
+- Compressed NDX only for proto ≥ 30
