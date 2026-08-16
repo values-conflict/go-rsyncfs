@@ -159,6 +159,7 @@ Skipped with `go test -short` or when `rsync` binaries are missing:
 
 - **Client integration**: start `rsync --daemon`, connect our Client to it, verify filesystem operations match expectations
 - **Server integration**: start our Server behind a stream, drive it with the real `rsync` client binary, verify transfers work correctly
+- **Multi-version integration**: use the `.upstream/old_versions/` folder full of old `rsync_X.Y.Z` binaries (covering protocol versions 27–32) to verify protocol compatibility across the full supported version range
 
 ### Process Management Requirements
 
@@ -174,4 +175,3 @@ If there is a way to run `rsync --daemon` without TCP socket/port binding (e.g.,
 - On-the-wire compression support
 - Authentication/access control sub-modules (if demand arises, could be separate packages that provide callbacks to wire into the core library)
   - Configuration file / upstream syntax parsing sub-modules
-- Use upstream's `old_versions` folder full of old `rsync_X.Y.Z` binaries to verify old protocol compatibility via our integration tests

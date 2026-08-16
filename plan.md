@@ -417,9 +417,30 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 **Process management:** All started rsync processes must be killed on test completion. No orphans.
 
-### Task 19 -- Protocol version coverage
+### Task 19 -- Multi-version upstream integration tests
 
-**Goal:** Systematic tests across the supported protocol version range (20-32). Verify negotiation, encoding differences, and feature gates work correctly per version.
+**Goal:** Integration tests that connect our library against each binary in `.upstream/old_versions/` (rsync 2.6.0 through 3.4.1, covering protocol versions 27, 30, 31, 32). Skipped with `-short` or when specific binaries are missing.
+
+**Files:** `integration_test.go` (extended)
+
+**Tests (client-side):**
+
+- Our Client connects to each `rsync_<version> --daemon`, verify FS operations (list, read) work correctly
+- Protocol negotiation: verify correct version is selected per binary's advertised protocol range
+- Version-specific behavior: features gated by protocol version (varint flist ≥ 30, mod_nsec ≥ 31) work or gracefully degrade
+
+**Tests (server-side):**
+
+- Each `rsync_<version>` client pulls from our Server
+- Verify transfers succeed across the full protocol version range our server supports
+
+**Process management:** All started rsync processes must be killed on test completion. No orphans. Prefer Unix sockets.
+
+**Binary discovery:** Scan `.upstream/old_versions/` for `rsync_*` binaries at test time; skip any not found.
+
+### Task 20 -- Protocol version coverage
+
+**Goal:** Systematic unit tests across the supported protocol version range (20-32). Verify negotiation, encoding differences, and feature gates work correctly per version.
 
 **Files:** `version_test.go`
 
