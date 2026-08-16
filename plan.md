@@ -37,7 +37,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 ## Phase 1: `protocol` -- low-level wire protocol
 
-### ~~Task 2 -- Protocol constants~~
+### Task 2 -- Protocol constants
 
 **Goal:** Define all protocol-level constants and version gates in the `protocol` package.
 
@@ -50,7 +50,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 - Verify constant values match upstream source
 - Verify IOERRValidMask covers exactly the defined bits
 
-### ~~Task 3 -- Integer wire encodings~~
+### Task 3 -- Integer wire encodings
 
 **Goal:** Implement variable-length integer formats (varint, varlong) for protocol ≥ 30, legacy longint for older protocols, fixed-width integers, and compressed NDX stateful encoding.
 

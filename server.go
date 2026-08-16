@@ -1,46 +1,50 @@
 package rsyncfs
 
 import (
-	"fmt"
 	"io"
 	"io/fs"
+
+	"github.com/values-conflict/go-rsyncfs/protocol"
 )
 
-// Server represents an rsync daemon server that serves one or more modules.
+// Server represents an rsync daemon that serves one or more modules.
+// Construct with NewServer.  A single Server handles multiple connections.
 type Server struct {
 	modules map[string]*ServerModule
+
+	// Greeting is the greeting the server advertises on every connection.
+	// Zero-value fields use defaults (version 32, digests ["md5", "md4"]).
+	Greeting protocol.Greeting
 }
 
-// ServerModule represents a single rsync module configuration and its backing filesystem.
+// ServerModule wraps a backing filesystem with rsync module configuration.
 type ServerModule struct {
-	Name     string
-	Comment  string
-	FS       fs.FS
-	ReadOnly bool
+	Name     string  // module name
+	Comment  string  // displayed in #list
+	FS       fs.FS   // backing filesystem
+	ReadOnly bool    // true = reject push operations
+
+	// AuthCallback verifies a username+challenge response for this module.
+	// Returns the expected raw digest bytes, or an error to reject.
+	// Nil means no authentication required for this module.
+	// Matches rsync's per-module secrets file model.
+	AuthCallback func(username string, challenge []byte) ([]byte, error)
 }
 
 // NewServer creates a new rsync daemon server with the provided modules.
 func NewServer(mods ...*ServerModule) (*Server, error) {
-	modules := make(map[string]*ServerModule)
-	for _, m := range mods {
-		if _, exists := modules[m.Name]; exists {
-			return nil, fmt.Errorf("module %q already exists", m.Name)
-		}
-		modules[m.Name] = m
-	}
-
-	return &Server{
-		modules: modules,
-	}, nil
+	// TODO: implement (Task 12)
+	return nil, nil
 }
 
-// formatError returns the rsync-style @ERROR line for a given message.
-func (s *Server) formatError(msg string) string {
-	return fmt.Sprintf("@ERROR: %s\n", msg)
-}
-
-// SendError writes an error response to the provided writer and closes it if necessary.
-func (s *Server) SendError(w io.Writer, msg string) error {
-	_, err := w.Write([]byte(s.formatError(msg)))
-	return err
+// HandleConnection runs the full rsync daemon protocol on a single connection.
+// The rw is the underlying transport (TCP socket, pipe, etc).
+// Returns when the connection is complete or an error occurs.
+//
+// Handles: greeting exchange, module selection (#list or named module),
+// authentication, argument parsing, compat flags, checksum negotiation,
+// file list transfer, selector loop, data transfer, final goodbye.
+func (s *Server) HandleConnection(rw io.ReadWriter) error {
+	// TODO: implement (Task 13)
+	return nil
 }

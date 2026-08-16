@@ -1,8 +1,6 @@
 <!-- remove from file when complete; keep a double space between TODO entries so they're more readable / digestible -->
 <!-- sub-bullets (2-space indent, `-`, cuddled -- no blank line between parent and sub-bullets, nor between sibling sub-bullets) are for related side notes subordinate to the main item but distinct enough to stand alone -- use a semicolon continuation for the same thought, a sub-bullet for a related angle, and a new top-level entry for a separate concern -->
 
-- we've updated plan.md with details from our new api-design.md rewrite - for every item in the plan that we claim is done, let's verify that it really *is* done -- let's also delete any code that doesn't serve the updated plan
-
 - what's the shape of upstream's test suite?  could it be adapated or ported so that we can run our implementations against it directly?
 
 - verify all comments match the appropriate/correct format
