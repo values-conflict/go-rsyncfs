@@ -339,7 +339,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 ### Task 15 -- Client struct & Connect
 
-**Goal:** Define the `Client` config struct and implement connection establishment + handshake from the client side. Returns a `Session` ready for FS operations.
+**Goal:** Define the `Client` config struct and implement connection establishment + handshake from the client side.  Returns a `Session` ready for FS operations.
 
 **Files:** `client.go`, `client-connect.go`, `client_test.go`
 
@@ -365,7 +365,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 ### Task 16 -- Client: Session.Open
 
-**Goal:** Implement `fs.FS.Open` for the client side. Opening a directory reads the file list; opening a file triggers the rsync data transfer protocol.
+**Goal:** Implement `fs.FS.Open` for the client side.  Opening a directory reads the file list; opening a file triggers the rsync data transfer protocol.
 
 **Files:** `client-open.go`, `client-open_test.go`
 
@@ -409,7 +409,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 ### Task 18 -- Cross-implementation tests
 
-**Goal:** Integration tests connecting Client directly to Server through `net.Pipe()` with embedded test fixtures. Run `testing/fstest.TestFS` as additional validation.
+**Goal:** Integration tests connecting Client directly to Server through `net.Pipe()` with embedded test fixtures.  Run `testing/fstest.TestFS` as additional validation.
 
 **Files:** `cross_test.go`, `testdata/` (embedded fixtures)
 
@@ -423,7 +423,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 ### Task 19 -- Upstream rsync integration tests
 
-**Goal:** Tests that connect our library to the real `rsync` binary. Skipped with `-short` or when `rsync` is not found.
+**Goal:** Tests that connect our library to the real `rsync` binary.  Skipped with `-short` or when `rsync` is not found.
 
 **Files:** `integration_test.go`
 
@@ -437,11 +437,11 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 - Our Server behind a stream, driven by real `rsync` client binary
 - Verify transfers work correctly (pull from server)
 
-**Process management:** All started rsync processes must be killed on test completion. No orphans.
+**Process management:** All started rsync processes must be killed on test completion.  No orphans.
 
 ### Task 20 -- Multi-version upstream integration tests
 
-**Goal:** Integration tests that connect our library against each binary in `.upstream/old_versions/` (rsync 2.6.0 through 3.4.1, covering protocol versions 27, 30, 31, 32). Skipped with `-short` or when specific binaries are missing.
+**Goal:** Integration tests that connect our library against each binary in `.upstream/old_versions/` (rsync 2.6.0 through 3.4.1, covering protocol versions 27, 30, 31, 32).  Skipped with `-short` or when specific binaries are missing.
 
 **Files:** `integration_test.go` (extended)
 
@@ -456,13 +456,13 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 - Each `rsync_<version>` client pulls from our Server
 - Verify transfers succeed across the full protocol version range our server supports
 
-**Process management:** All started rsync processes must be killed on test completion. No orphans. Prefer Unix sockets.
+**Process management:** All started rsync processes must be killed on test completion.  No orphans.  Prefer Unix sockets.
 
 **Binary discovery:** Scan `.upstream/old_versions/` for `rsync_*` binaries at test time; skip any not found.
 
 ### Task 21 -- Protocol version coverage
 
-**Goal:** Systematic unit tests across the supported protocol version range (20-32). Verify negotiation, encoding differences, and feature gates work correctly per version.
+**Goal:** Systematic unit tests across the supported protocol version range (20-32).  Verify negotiation, encoding differences, and feature gates work correctly per version.
 
 **Files:** `version_test.go`
 
