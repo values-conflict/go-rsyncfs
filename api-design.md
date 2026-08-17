@@ -867,6 +867,16 @@ The library doesn't parse `secrets file` format or manage user databases.  The `
 
 The library is synchronous and connection-oriented.  `HandleConnection` blocks until the connection is done.  `Connect` blocks until the handshake completes.  The caller manages concurrency (one goroutine per connection, connection pooling, etc).  This matches the goals.md constraint and keeps the API simple.
 
+### Why no `context.Context` in the API
+
+The library does not accept `context.Context` in any API method.  Three reasons:
+
+- `Session` implements `fs.FS`, whose `Open(name string) (fs.File, error)` signature cannot take context.  Adding context to `Connect()` or `HandleConnection()` while leaving `Open()` context-free creates an inconsistent API.
+- The library has no internal goroutines.  Context is useful for cancelling background work; these methods block synchronously on I/O with nothing to cancel internally.
+- Callers that need cancellation can close the underlying transport (e.g., `net.Conn.Close()`) to unblock the library's I/O calls, or wrap the blocking call in a goroutine with `select` on `ctx.Done()`.
+
+If the library later adds internal goroutines (e.g., for concurrent transfers or background caching), context.Context can be evaluated at that point.  The goals.md constraint requires consulting before adding goroutines.
+
 ### Why `Session` implements `fs.FS`, not `Client`
 
 `Client` is config; `Session` is the live connection.  `fs.FS.Open()` operates on a connection -- it reads file lists and transfers data.  Separating config from connection state makes the API clean: construct `Client` once, call `Connect()` multiple times for independent sessions.

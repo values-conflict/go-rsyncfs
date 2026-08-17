@@ -8,5 +8,3 @@
 - can we somehow get creative with the `net.Pipe` usage / tests to avoid the goroutines entirely?
 
 - if `.upstream/rsync` exists, `integration_test.go` should prefer it (maybe even before consulting `PATH`? we should explore pros/cons of this)
-
-- should we be using `context.Context` in any of our API?
