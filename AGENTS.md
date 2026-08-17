@@ -39,5 +39,5 @@ When implementing tasks, read the relevant trash files for protocol knowledge (w
 | `trash/client_test.go` | Task 15 | startServer helper, Connect success/version/auth, OpenRoot module listing, PasswordAuth, computeAuthHash |
 | `trash/client-open.go` | Task 16 | flistReader, fileListEntry, readFileList, writeNdx (compressed), phaseExchange, writeSelector, openModule, openFile, openRootMode, moduleFile, moduleDirFile, symlinkFile, fileInfo, findEntry, filterChildren |
 | `trash/client-open_test.go` | Task 16 | File open, directory listing, subdirectory, symlinks, empty files, large files, root mode, flistReader parsing, writeNdx compressed encoding, writeSelector item flags |
-| `trash/cross_test.go` | Task 17 | Full directory tree, subdirectory listing, symlinks, large files, fstest.TestFS, version negotiation, root mode, file content integrity, multi-file single connection |
-| `trash/integration_test.go` | Tasks 18-19 | Real rsync daemon integration, rsync client pulling from our server, process management, Unix socket preference |
+| `trash/cross_test.go` | Task 18 | Full directory tree, subdirectory listing, symlinks, large files, fstest.TestFS, version negotiation, root mode, file content integrity, multi-file single connection |
+| `trash/integration_test.go` | Task 19 | Real rsync daemon integration, rsync client pulling from our server, process management, Unix socket preference |
