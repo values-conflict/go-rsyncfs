@@ -44,7 +44,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 ## Phase 1: `protocol` -- low-level wire protocol
 
-### Task 2 -- Protocol constants
+### ~~Task 2 -- Protocol constants~~
 
 **Goal:** Define all protocol-level constants and version gates in the `protocol` package.
 

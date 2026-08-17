@@ -58,10 +58,10 @@ func ParseGreeting(line string) (*Greeting, error) {
 }
 
 // ApplyDefaults fills in missing fields with sensible defaults:
-// version 32, subprotocol 0, digests ["md5", "md4"].
+// version [CurrentProtocolVersion], subprotocol 0, digests ["md5", "md4"].
 func (g *Greeting) ApplyDefaults() {
 	if g.Version == 0 {
-		g.Version = 32
+		g.Version = CurrentProtocolVersion
 		g.SubProtocol = 0
 	}
 	if len(g.Digests) == 0 {
@@ -116,8 +116,8 @@ func Negotiate(client, server Greeting) (version int, subProtocol byte, digest s
 		}
 	}
 
-	if version < 20 {
-		return 0, 0, "", fmt.Errorf("negotiated protocol version %d is too low (min 20)", version)
+	if version < MinProtocolVersion {
+		return 0, 0, "", fmt.Errorf("negotiated protocol version %d is too low (min %d)", version, MinProtocolVersion)
 	}
 
 	// digest negotiation: client preference wins. pick the first algorithm in the client's list that also appears in the server's list
