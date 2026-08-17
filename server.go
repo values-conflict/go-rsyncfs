@@ -19,10 +19,10 @@ type Server struct {
 
 // ServerModule wraps a backing filesystem with rsync module configuration.
 type ServerModule struct {
-	Name     string  // module name
-	Comment  string  // displayed in #list
-	FS       fs.FS   // backing filesystem
-	ReadOnly bool    // true = reject push operations
+	Name     string // module name
+	Comment  string // displayed in #list
+	FS       fs.FS  // backing filesystem
+	ReadOnly bool   // true = reject push operations
 
 	// AuthCallback verifies a username+challenge response for this module.
 	// Returns the expected raw digest bytes, or an error to reject.

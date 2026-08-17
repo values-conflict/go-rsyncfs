@@ -59,9 +59,9 @@ const (
 // is flushed automatically.  This prevents unbounded memory growth during large
 // file transfers and ensures the remote end receives data incrementally.
 type Writer struct {
-	w          io.Writer
-	buf        bytes.Buffer // accumulates raw writes for batching into MSG_DATA frames
-	bufSize    int          // max buffer size before auto-flush (0 = unlimited)
+	w       io.Writer
+	buf     bytes.Buffer // accumulates raw writes for batching into MSG_DATA frames
+	bufSize int          // max buffer size before auto-flush (0 = unlimited)
 }
 
 func NewWriter(w io.Writer) *Writer {
