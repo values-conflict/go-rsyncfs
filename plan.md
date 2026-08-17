@@ -460,7 +460,57 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 **Binary discovery:** Scan `.upstream/old_versions/` for `rsync_*` binaries at test time; skip any not found.
 
-### Task 21 -- Protocol version coverage
+### Task 21 -- Ported upstream security & edge-case tests
+
+**Goal:** Port select upstream regression tests that exercise protocol-level security fixes, malformed-input handling, and wire-format edge cases.  Each test is a self-contained Go test that reproduces the upstream scenario using our own `protocol/` and `Server` types -- no Python harness, no external binaries.
+
+**Files:** `upstream-..._test.go` (one per ported test)
+
+**Naming:** `upstream-<upstream-test-name>_test.go` (e.g., `upstream-proto-hlink-gnum_test.go`).  The filename must round-trip to the upstream test via `sed 's/^upstream-//;s/_test\.go$//'`.
+
+**Structure per test:** Each file opens with a prose comment block (not code) that answers:
+- Which upstream test this ports (filename + commit or version if relevant)
+- What vulnerability or bug the upstream test catches (the *why*)
+- What our implementation should do differently or the same (the oracle)
+
+**Selection criteria:** Port tests that verify our server rejects malformed wire data gracefully.  Skip tests that only exercise C-specific behavior (ASan redzones, assert() placement, pool_alloc internals) unless the underlying protocol rule is implementation-independent.
+
+**Tests to port (high-priority):**
+
+- `proto-hlink-gnum_test.py` -- undeclared back-reference hard-link gnum must be rejected with a protocol error, not panic/crash.  Tests that `recv_file_entry` validates hlink_ndx bounds.
+- `proto-parent-ndx-empty-dirflist_test.py` -- first inc_recurse flist with "." as a regular file (not directory) must not cause invalid access.  Tests that parent_ndx is validated against dir_flist contents.
+- `proto-hlink-flag-oob_test.py` -- XMIT_HLINKED set without -H flag must be ignored, not cause out-of-bounds write.  Tests that flag validation gates hard-link processing.
+- `checksum-zero-blocklen_test.py` -- sum_head with count>0 and blength=0 must be rejected.  Tests that the receiver validates block length before use.
+- `xattr-wire-cap_test.py` -- oversized xattr datum_len in file list must be rejected before reading the value.  Tests wire-length bounds checking.
+- `proto-sender-selftest_test.py` -- sender self-test mechanism (if applicable to our implementation).  Tests protocol-level self-verification.
+- `proto-cleared-dirflist_test.py` -- cleared dir_flist must not cause invalid access.  Tests flist lifecycle safety.
+- `proto-cleared-ndx_test.py` -- cleared NDX state must not cause invalid access.  Tests NDX validation.
+
+**Tests to port (medium-priority, if time):**
+
+- `malicious-dot-dir-delete-scope_test.py` -- malicious sender must not enlarge --delete scope via synthetic "." entry.  Tests delete confinement.
+- `malicious-dot-file-delete-scope_test.py` -- same as above but for file entries.
+- `proto-msg-info-assert_test.py` -- MSG_INFO handling must not trigger assert.  Tests message dispatch safety.
+- `proto-subflist-freed_test.py` -- sub-flist after free must be refused.  Tests flist lifecycle.
+- `readonly-partial-abort-mode-regression_test.py` -- readonly + partial abort interaction.  Tests mode flag consistency.
+
+**Tests to skip (C-specific, not portable):**
+
+- `proto-hlink-flag-oob_test.py` ASan variant -- the OOB write is a C memory layout issue; port only the protocol-rule test (flag validation), not the memory-corruption oracle
+- Any test that requires `require_asan()` -- ASan redzones are a C build artifact
+- Any test that checks for specific C error messages (e.g., "assert() failed") -- we check behavior, not crash type
+
+**Key details:**
+
+- Tests use `net.Pipe()` or `io.Pipe()` -- no TCP sockets, no port management
+- The "client" side is hand-constructed wire bytes (using `protocol/` encoders) or a minimal test struct, not the full Client type
+- The "server" side is our `Server.HandleConnection` under test
+- Oracle is behavioral: connection rejected with error, not panic; error contains expected substring; server remains usable for next connection
+- Each test is `-short` compatible (no external dependencies)
+
+**Why this matters:** These tests verify that our Go implementation handles the same malformed-input cases that caused real security bugs in the C rsync.  They are regression tests -- if a future refactor breaks validation, these tests catch it.
+
+### Task 22 -- Protocol version coverage
 
 **Goal:** Systematic unit tests across the supported protocol version range (20-32).  Verify negotiation, encoding differences, and feature gates work correctly per version.
 
