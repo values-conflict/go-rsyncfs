@@ -621,3 +621,4 @@ When generating or editing Go code in this project:
 - **Do not add error wrapping that strips information.**  `fmt.Errorf("error: %v", err)` without `%w` loses the original error type.  Use `%w` unless you intentionally want to hide the underlying error.
 - **Prefer `t.Fatal` over `t.Error` + `return`** in tests when continuing after a failure would cause a nil dereference or meaningless subsequent failures.
 - **Do not change `go.mod` or `go.sum`** unless the task explicitly requires a new dependency.  If a standard library alternative exists, use it.
+- **Do not write tests that verify a value against itself.**  Testing that a constant equals its defined value, or that a function returning a hardcoded slice returns that exact slice, is tautological and adds no value.  Constants are verified by code review against upstream, not by tests.  Test behavior (round-trips, wire format, edge cases, integration flows), not implementation details.

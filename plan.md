@@ -52,11 +52,6 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 **API:** Per [api-design.md](api-design.md) -- protocol version constants (Min, Old, Current, Max), compat flag bits (CF_INC_RECURSE through CF_ID0_NAMES), IO error constants (IOERRGeneral, IOERRVanished, IOERRDelLimit, IOERRValidMask), xmit flag bits (XMIT_TOP_DIR through XMIT_CRTIME_EQ_MTIME), item flag bits (ITEM_REPORT_ATIME through ITEM_MATCHED), special NDX values (NDX_DONE, NDX_FLIST_EOF).
 
-**Tests:**
-
-- Verify constant values match upstream source
-- Verify IOERRValidMask covers exactly the defined bits
-
 ### ~~Task 3 -- Integer wire encodings~~
 
 **Goal:** Implement variable-length integer formats (varint, varlong) for protocol ≥ 30, legacy longint for older protocols, fixed-width integers, and compressed NDX stateful encoding.

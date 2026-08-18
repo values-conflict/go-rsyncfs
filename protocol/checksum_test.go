@@ -153,19 +153,6 @@ func TestChecksum2_UnsupportedDigest(t *testing.T) {
 	}
 }
 
-func TestSupportedDigests(t *testing.T) {
-	got := SupportedDigests()
-	want := []string{"md5", "md4"}
-	if len(got) != len(want) {
-		t.Fatalf("SupportedDigests() = %v, want %v", got, want)
-	}
-	for i, d := range got {
-		if d != want[i] {
-			t.Errorf("SupportedDigests()[%d] = %q, want %q", i, d, want[i])
-		}
-	}
-}
-
 func TestSumHead_Protocol27(t *testing.T) {
 	sh := SumHead{
 		Count:     5,
