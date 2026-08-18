@@ -183,7 +183,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 - End-of-list marker correctly terminates reading
 - Protocol version differences: proto 27 vs 30 vs 31 wire format
 
-### Task 9 -- Selector wire format
+### ~~Task 9 -- Selector wire format~~
 
 **Goal:** Implement the selector (file transfer request) wire format used in the selector loop.
 
