@@ -49,7 +49,7 @@ func ReadVstring(r io.Reader) (string, error) {
 		if _, err := io.ReadFull(r, b[:]); err != nil {
 			return "", err
 		}
-		length = (length & 0x7F)<<8 | int(b[0])
+		length = (length&0x7F)<<8 | int(b[0])
 	}
 
 	if length == 0 {

@@ -16,7 +16,13 @@ func TestChecksum1(t *testing.T) {
 		{"single-byte", []byte("a"), 0x00610061},
 		{"three-bytes", []byte("abc"), 0x024A0126},
 		{"hello-world", []byte("hello world"), 0x1A00045C},
-		{"16x-A", func() []byte { d := make([]byte, 16); for i := range d { d[i] = 0x41 }; return d }(), 0x22880410},
+		{"16x-A", func() []byte {
+			d := make([]byte, 16)
+			for i := range d {
+				d[i] = 0x41
+			}
+			return d
+		}(), 0x22880410},
 	}
 
 	for _, tc := range tests {

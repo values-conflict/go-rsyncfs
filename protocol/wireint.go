@@ -65,7 +65,7 @@ func WriteVarint(w io.Writer, x int32) error {
 		cnt++
 		b[0] = ^(bit - 1)
 	} else if cnt > 1 {
-		b[0] = b[cnt] | ^(bit*2-1)
+		b[0] = b[cnt] | ^(bit*2 - 1)
 	} else {
 		b[0] = b[1]
 	}
@@ -113,7 +113,7 @@ func WriteVarlong(w io.Writer, x int64, minBytes byte) error {
 		cnt++
 		b[0] = ^(bit - 1)
 	} else if cnt > int(minBytes) {
-		b[0] = b[cnt] | ^(bit*2-1)
+		b[0] = b[cnt] | ^(bit*2 - 1)
 	} else {
 		b[0] = b[cnt]
 	}
@@ -218,7 +218,7 @@ func (s *NdxState) WriteNdx(w io.Writer, ndx int32) error {
 		} else if diff < 0 || diff > 0x7FFF {
 			b[cnt] = 0xFE
 			cnt++
-			b[cnt] = byte((ndx>>24)|0x80)
+			b[cnt] = byte((ndx >> 24) | 0x80)
 			cnt++
 			b[cnt] = byte(ndx)
 			cnt++
@@ -249,7 +249,7 @@ func (s *NdxState) WriteNdx(w io.Writer, ndx int32) error {
 		} else if diff < 0 || diff > 0x7FFF {
 			b[cnt] = 0xFE
 			cnt++
-			b[cnt] = byte((ndx>>24)|0x80)
+			b[cnt] = byte((ndx >> 24) | 0x80)
 			cnt++
 			b[cnt] = byte(ndx)
 			cnt++
@@ -307,7 +307,7 @@ func (s *NdxState) readNdxPositive(r io.Reader, firstByte []byte, prev *int32, n
 			// full 4-byte absolute value -- upstream uses non-standard byte order:
 			// wire: [B3|0x80, B0, B1, B2] -> LE read as [B0, B1, B2, B3&0x7F]
 			var full [4]byte
-			full[0] = b[1]       // B0
+			full[0] = b[1] // B0
 			if _, err := io.ReadFull(r, full[1:3]); err != nil {
 				return 0, err
 			}
