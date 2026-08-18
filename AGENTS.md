@@ -15,7 +15,7 @@ There is a definitive protocol reference in `protocol.md`, verified against the 
 
 `plan.md` should always read as a current, up-to-date plan -- written as if the plan had always been this way.  The only indicator of progress is crossed-off task/phase titles.  Avoid language like "Implementation note", "changed from plan", "replaced by", "added", "rearchitecture", "Current status", or "Currently" that reads as a retroactive correction.
 
-For now, we don't care about backwards compatibility for consumers of our API/library -- if an API, description, documentation, etc needs to change, it should just change.
+For now, we don't care about backwards compatibility for consumers of our API/library -- if an API, description, documentation, etc needs to change, it should just change.  We care about upstream compatibility/correctness above all.
 
 ### `trash/` -- superseded implementation code
 
