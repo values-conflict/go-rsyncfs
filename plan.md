@@ -135,7 +135,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 - SumHead: round-trip with and without s2length (proto < 27 vs ≥ 27)
 - Empty file (count=0) produces correct SumHead
 
-### Task 7 -- Delta stream
+### ~~Task 7 -- Delta stream~~
 
 **Goal:** Implement the delta stream format: streaming API (DeltaWriter/DeltaReader) for hot-path transfer and batch API (ParseDeltaStream/WriteDeltaStream) for testing and tools.
 
@@ -145,18 +145,20 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 **Key details:**
 
-- Literal token: `0x01` prefix + length + data
-- Match token: `0x00` prefix + 4-byte LE block index
-- End marker: `0xFF`
+- Simple (non-compressing) format: `int32(positive_len)` + data for literal, `int32(-(blockIdx+1))` for match, `int32(0)` for end
+- Large literals (>32KB CHUNK_SIZE) are split into multiple wire tokens
+- Matches upstream `simple_send_token()`/`simple_recv_token()` when `do_compression == CPRES_NONE`
 - Batch functions implemented on top of streaming ones
 
 **Tests:**
 
-- Round-trip delta streams through io.Pipe()
+- Round-trip delta streams through net.Pipe()
 - Mixed literal and match tokens
 - Empty delta stream (just end marker)
-- Large literal data
+- Large literal data (>32KB CHUNK_SIZE, split across multiple tokens)
 - Batch API matches streaming API output
+- Wire format verification: match(0) = 0xFFFFFFFF, match(255) = 0xFFFFFF00, end = 0x00000000
+- Edge cases: empty literal, truncated data, EOF
 
 ### Task 8 -- File list I/O
 
