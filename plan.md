@@ -205,7 +205,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 - Compressed NDX state tracking across multiple selectors
 - Proto version differences: selector format at proto 28 vs 30 vs 32
 
-### Task 10 -- Argument parsing
+### ~~Task 10 -- Argument parsing~~
 
 **Goal:** Implement rsync command-line argument reading/writing and client_info feature flag extraction.
 
