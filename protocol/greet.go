@@ -58,14 +58,14 @@ func ParseGreeting(line string) (*Greeting, error) {
 }
 
 // ApplyDefaults fills in missing fields with sensible defaults:
-// version [CurrentProtocolVersion], subprotocol 0, digests ["md5", "md4"].
+// version [CurrentProtocolVersion], subprotocol 0, digests from [SupportedDigests].
 func (g *Greeting) ApplyDefaults() {
 	if g.Version == 0 {
 		g.Version = CurrentProtocolVersion
 		g.SubProtocol = 0
 	}
 	if len(g.Digests) == 0 {
-		g.Digests = []string{"md5", "md4"}
+		g.Digests = SupportedDigests()
 	}
 }
 

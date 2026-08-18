@@ -118,7 +118,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 - Verify wire format: short strings use 1-byte length, long strings use 2-byte length
 - Empty string round-trips correctly
 
-### Task 6 -- Checksum algorithms
+### ~~Task 6 -- Checksum algorithms~~
 
 **Goal:** Implement rsync's rolling checksum (checksum1), strong hash (checksum2), and SumHead wire format.
 

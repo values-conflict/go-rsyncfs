@@ -21,6 +21,11 @@ func TestGreetingApplyDefaults(t *testing.T) {
 				if len(g.Digests) == 0 {
 					t.Error("Digests should be non-empty after ApplyDefaults")
 				}
+				// digests must match SupportedDigests exactly
+				want := SupportedDigests()
+				if !reflect.DeepEqual(g.Digests, want) {
+					t.Errorf("Digests = %v, want SupportedDigests() = %v", g.Digests, want)
+				}
 			},
 		},
 		{
