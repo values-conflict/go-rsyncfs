@@ -99,7 +99,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 - Subprotocol mismatch causes version downgrade
 - ApplyDefaults fills zero-value fields idempotently
 
-### Task 5 -- vstring encoding
+### ~~Task 5 -- vstring encoding~~
 
 **Goal:** Implement vstring (length-prefixed string) encoding used in the wire protocol.
 
