@@ -229,7 +229,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 - ResolveCompatFlags maps feature letters to correct flag bits
 - Empty argument list (just ".")
 
-### Task 11 -- Handshake primitives
+### ~~Task 11 -- Handshake primitives~~
 
 **Goal:** Implement building blocks for the full handshake: greeting I/O, module selection, authentication, compat flags, algorithm negotiation, and error parsing.
 
