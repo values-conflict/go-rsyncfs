@@ -160,7 +160,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 - Wire format verification: match(0) = 0xFFFFFFFF, match(255) = 0xFFFFFF00, end = 0x00000000
 - Edge cases: empty literal, truncated data, EOF
 
-### Task 8 -- File list I/O
+### ~~Task 8 -- File list I/O~~
 
 **Goal:** Implement file list entry wire format with delta-encoded xmit flags, supporting all protocol versions (20-32) and both byte and varint xflags encoding.
 
