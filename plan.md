@@ -257,7 +257,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 ## Phase 2: Server
 
-### Task 12 -- Server struct & module configuration
+### ~~Task 12 -- Server struct & module configuration~~
 
 **Goal:** Define the `Server` type with module-to-filesystem mapping and auth callback support.
 

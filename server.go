@@ -1,6 +1,7 @@
 package rsyncfs
 
 import (
+	"fmt"
 	"io"
 	"io/fs"
 
@@ -32,9 +33,16 @@ type ServerModule struct {
 }
 
 // NewServer creates a new rsync daemon server with the provided modules.
+// Returns an error if any two modules share the same name.
 func NewServer(mods ...*ServerModule) (*Server, error) {
-	// TODO implement (Task 12)
-	return nil, nil
+	modules := make(map[string]*ServerModule, len(mods))
+	for _, m := range mods {
+		if _, exists := modules[m.Name]; exists {
+			return nil, fmt.Errorf("duplicate module name %q", m.Name)
+		}
+		modules[m.Name] = m
+	}
+	return &Server{modules: modules}, nil
 }
 
 // HandleConnection runs the full rsync daemon protocol on a single connection.
