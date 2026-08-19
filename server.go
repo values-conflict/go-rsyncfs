@@ -2,7 +2,6 @@ package rsyncfs
 
 import (
 	"fmt"
-	"io"
 	"io/fs"
 
 	"github.com/values-conflict/go-rsyncfs/protocol"
@@ -45,14 +44,4 @@ func NewServer(mods ...*ServerModule) (*Server, error) {
 	return &Server{modules: modules}, nil
 }
 
-// HandleConnection runs the full rsync daemon protocol on a single connection.
-// The rw is the underlying transport (TCP socket, pipe, etc).
-// Returns when the connection is complete or an error occurs.
-//
-// Handles: greeting exchange, module selection (#list or named module),
-// authentication, argument parsing, compat flags, checksum negotiation,
-// file list transfer, selector loop, data transfer, final goodbye.
-func (s *Server) HandleConnection(rw io.ReadWriter) error {
-	// TODO implement (Task 13)
-	return nil
-}
+

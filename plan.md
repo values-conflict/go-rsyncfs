@@ -278,7 +278,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 - Module lookup by name
 - AuthCallback verification flow
 
-### Task 13 -- Server: HandleConnection
+### ~~Task 13 -- Server: HandleConnection~~
 
 **Goal:** Implement the full server-side connection handling: handshake (greeting, module selection, auth, args, compat flags, algorithms, seed), file list transfer, selector loop, data transfer, final goodbye, and stats exchange.
 
