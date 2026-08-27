@@ -7,13 +7,13 @@ Exported surface of the final go-rsyncfs library.  Designed from the protocol re
 ```
 rsyncfs/                   -- root package: Client, Server, FS integration
   client.go                -- Client config struct
-  client_connect.go        -- Connect(), OpenRoot(), Session
-  client_open.go           -- Session.Open(), fs.FS implementation
-  client_send.go           -- push / send-side (future writability)
+  client-connect.go        -- Connect(), OpenRoot(), Session
+  client-open.go           -- Session.Open(), fs.FS implementation
+  client-send.go           -- push / send-side (future writability)
   server.go                -- Server, ServerModule
-  server_handshake.go      -- HandleConnection(), handshake logic
-  server_send.go           -- Daemon sender: file list, data transfer
-  server_recv.go           -- Daemon receiver: accept pushed files (future)
+  server-handshake.go      -- HandleConnection(), handshake logic
+  server-send.go           -- Daemon sender: file list, data transfer
+  server-recv.go           -- Daemon receiver: accept pushed files (future)
 
 protocol/                  -- low-level wire protocol (independently reusable)
   greet.go                 -- Greeting type, ParseGreeting, Negotiate
