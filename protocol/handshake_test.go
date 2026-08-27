@@ -45,9 +45,9 @@ func TestReadGreeting_EOF(t *testing.T) {
 
 func TestReadModuleRequest(t *testing.T) {
 	tests := []struct {
-		name string
+		name  string
 		input string
-		want string
+		want  string
 	}{
 		{"normal module", "mydata\n", "mydata"},
 		{"list request", "#list\n", "#list"},
@@ -358,9 +358,9 @@ func TestChecksumSeed(t *testing.T) {
 
 func TestParseError(t *testing.T) {
 	tests := []struct {
-		name  string
-		line  string
-		want  bool // true if error expected
+		name string
+		line string
+		want bool // true if error expected
 	}{
 		{"error line", "@ERROR: Unknown module", true},
 		{"ok line", "@RSYNCD: OK", false},

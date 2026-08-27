@@ -37,6 +37,7 @@ Both sides send a greeting simultaneously (simultaneous write, then read).  Sour
 ```
 
 - `<version>` is the protocol version number (eg, 32).
+- The `.<sub>` and the digest list are modern additions.  2.6.x sends a bare `@RSYNCD: <version>` with neither (`.upstream/clientserver.c` v2.6.0, `io_printf(f_out, "@RSYNCD: %d\n", PROTOCOL_VERSION);`), and parses the peer with `sscanf(line, "@RSYNCD: %d", ...)`; a receiver for proto < 30 must accept the bare form and the absence of a digest list.
 - `<sub>` is the subprotocol version (0 for final releases, nonzero for pre-releases).  Source: `.upstream/compat.c:896-903`, `int get_subprotocol_version() ... }`.
 - The digest list is space-separated.  Modern rsync always includes it in the greeting (`.upstream/compat.c:851-853` calls `get_default_nno_list()`).  If omitted on protocol 32+, it is a fatal error (`.upstream/clientserver.c:234-24, `get_default_nno_list(&valid_auth_checksums, tmpbuf, MAX_NSTR_STRLEN, '\0'); ... io_printf(f_out, "@RSYNCD: %d.%d %s\n", protocol_version, our_sub, tmpbuf);`0`, gate `remote_protocol > 31`).  If omitted on protocol 30-31, the receiver assumes `md5`; on protocol < 30, it assumes `md4` (`daemon_auth_choices` stays unset, `.upstream/clientserver.c:228-233`, `daemon_auth_choices = strchr(buf + 9, ' '); ... *cp = '\0';`; the default algorithm comes from `.upstream/compat.c:555-556`, `else ... len = strlcpy(tmpbuf, protocol_version >= 30 ? "md5" : "md4", MAX_NSTR_STRLEN);`).
 
@@ -177,7 +178,7 @@ Major change: the multiplexed I/O layer was introduced, allowing MSG_DATA frames
 
 Source: `.upstream/main.c:1293`, `io_start_multiplex_out(f_out);` (`if (protocol_version >= 23) io_start_multiplex_out(f_out)`), `.upstream/main.c:1399`, `io_start_multiplex_in(f_in);` (`if (protocol_version >= 23) io_start_multiplex_in(f_in)`).
 
-Before protocol 23, all I/O was buffered (raw bytes).  From protocol 23 onward, the daemon→client channel (file data) uses multiplexed I/O.
+Before protocol 23, all I/O was buffered (raw bytes).  From protocol 23 onward the daemon's output is multiplexed (`io_start_multiplex_out(f_out)` in `start_server()`, gated on `protocol_version >= 23`), while the client's output stays buffered/raw until protocol 30 (`io_start_multiplex_out(f_out)` in `client_run()`, gated on `protocol_version >= 30`).  The client's input is multiplexed from protocol 23 (`io_start_multiplex_in(f_in)` in `client_run()`), and the daemon's input only becomes multiplexed at protocol 30/31 (`need_messages_from_generator`).  So proto 23-29 are asymmetric: only the daemon→client direction is framed; proto ≥ 30 is bidirectional.
 
 #### Protocol 24 -- final goodbye message
 
@@ -743,19 +744,28 @@ name_suffix       : raw[name_suffix_len]
     [username]    : vstring (if XMIT_USER_NAME_FOLLOWS)
 [gid]             : varint (proto ≥ 30) or int32 LE (older) (if preserve_gid, !XMIT_SAME_GID)
     [groupname]   : vstring (if XMIT_GROUP_NAME_FOLLOWS)
-[rdev_major]      : varint30/byte (if device, !XMIT_SAME_RDEV_MAJOR)
-[rdev_minor]      : varint (proto ≥ 30) or byte/int32 (older)
-[symlink_target_len] : varint30 (if symlink)
+[rdev]            : int32 LE, full packed dev_t (if device, !XMIT_SAME_RDEV, proto < 28)
+[rdev_major]      : int32 LE (proto 28-29) or varint30 (proto ≥ 30) (if device, !XMIT_SAME_RDEV_MAJOR)
+[rdev_minor]      : byte (if ≤ 255 and XMIT_RDEV_MINOR_IS_SMALL_pre30, proto 28-29) or int32 LE (proto 28-29) or varint (proto ≥ 30)
+[symlink_target_len] : int32 LE (proto < 30) or varint30 (proto ≥ 30) (if symlink)
 [symlink_target]  : raw[len]
 [hlink_ndx]       : varint (if XMIT_HLINKED, !XMIT_HLINK_FIRST, proto ≥ 30)
-[dev]             : longint (if hlink, proto 28-29, !XMIT_SAME_DEV_pre30)
-[ino]             : longint (if hlink, proto 28-29)
-[dev]             : int32 LE (if hlink, proto < 26, 1-incremented)
-[ino]             : int32 LE (if hlink, proto < 26)
-[checksum]        : raw[csum_len] (if always_checksum, regular file)
+[dev]             : int32 LE (proto < 26) or longint (proto 26-27), as-is, for EVERY regular file when preserve_hard_links (no xmit flag)
+[ino]             : int32 LE (proto < 26) or longint (proto 26-27), as-is
+[dev]             : longint (if XMIT_HLINKED/XMIT_HAS_IDEV_DATA, !XMIT_SAME_DEV_pre30, proto 28-29)
+[ino]             : longint (proto 28-29)
+[checksum]        : raw[csum_len] (if always_checksum; proto < 28: every entry -- a null 16-byte MD4 for non-regular files; proto ≥ 28: regular files only)
 ```
 
-**End-of-list:** `NDX_DONE` sent as compressed NDX (1 byte `0x00` for proto ≥ 30).
+**Hard link dev encoding:** The 2.6.x daemons (the only peers that negotiate sub-30 protocols) transmit the dev number as-is, both when sending and when reading.  Daemons >= 3.1 write the dev 1-incremented in their outgoing sub-30 stream ("Older protocols expect the dev number to be transmitted 1-incremented so that it is never zero", `.upstream/flist.c`, `SUPPORT_HARD_LINKS` block), but even they read it back raw -- the convention changed in 3.1.0 and only affects the >= 3.1 sender side.
+
+**End-of-list:** For varint xflags: varint `0` (end marker) followed by varint io_error value (usually `0`).  For byte xflags: byte `0` (end marker), or shortint `XMIT_EXTENDED_FLAGS|XMIT_IO_ERROR_ENDLIST` + varint io_error if there were I/O errors.
+
+**Id lists and io_error, by era:** The uid/gid name lists (introduced in proto 15) are sent in traditional (non-inc-recursive) mode only.  Their position relative to the io_error value *changed between the 2.6.x and 3.x trees*:
+- **2.6.x (the peers that negotiate proto < 30):** entries → end marker → uid list → gid list → `int32` io_error trailer.  Each list: `int32 id` + `byte len` + `raw[len] name` per unique named id, terminated by `int32 0`; the uid list is sent only when `preserve_uid`, the gid list only when `preserve_gid`, and both are omitted entirely when the client set `numeric_ids` (`.upstream/uidlist.c` v2.6.0, `send_uid_list()` / `recv_uid_list()`; order per `.upstream/flist.c` v2.6.0, `send_file_list()` / `recv_file_list()`).
+- **3.x (proto ≥ 30, traditional mode):** entries → varint `0` end marker → varint io_error → uid list → gid list (`.upstream/flist.c`, `recv_file_list()` calls `recv_id_list(f, flist)` after the end marker).  Each list: `varint30 id` + `byte len` + `raw[len] name`, terminated by `varint30(0)`; with the `CF_ID0_NAMES` compat flag the name for id 0 follows that terminator (the terminator doubles as its id).  The uid list is sent when `preserve_uid || preserve_acls` and read when that holds and `numeric_ids <= 0`; the gid list likewise.
+
+The `NDX_DONE` marker is NOT part of the file list; it is sent separately by the generator during the selector protocol.
 
 ### Step 11: Phase exchange (binary)
 
@@ -794,9 +804,11 @@ The daemon reads selectors from the generator on the daemon socket (buffered inp
 10. For proto ≥ 31, if not early: sends delete stats and delete NDX_DONE (`.upstream/generator.c:2912-2916`, `if (!EARLY_DELETE_DONE_MSG()) { ... }`).
 11. Generator waits for delete completion: `while (msgdone_cnt == 3) wait_for_receiver()` (`.upstream/generator.c:2919-2920`, `while (msgdone_cnt == 3) ... wait_for_receiver();`).
 
-**For proto < 29 (max_phase = 1):**
-- No phase exchange -- the generator just sends selectors and NDX_DONE, and the daemon processes them in a single pass.
-- If `!inc_recurse`, the generator sends `write_ndx(f_out, NDX_DONE)` after all selectors (`.upstream/generator.c:2831-2833`, `if (!inc_recurse) { ... break;`).
+**For proto < 29 (max_phase = 1):** Two NDX_DONE packets are still exchanged, both as plain int32 `write_int(f_out, -1)` (no compressed NDX, no iflags, no keep-alive):
+1. The generator sends all selectors, then `write_int(f_out, -1)` (upstream v2.6.0 `generate_files()`, `write_int(f,-1)` after the item loop).
+2. The daemon (v2.6.0 `send_files()`) echoes `write_int(f_out, -1)` on the first one and breaks out of the loop on the second.
+3. The daemon then writes one trailing `write_int(f_out, -1)` after the loop (v2.6.0 `sender.c`, end of `send_files()`), followed by the stats (step 16).
+4. The receiver (v2.6.0 `recv_files()`) treats the first `-1` as the phase-0 marker (it writes `write_int(f_gen, -1)` to the generator pipe so the generator can finish its redo list) and the trailing `-1` as the end of the stream.  The generator sends the second `-1` only after it has drained that redo list; the final int32 `-1` goodbye (step 17) is sent after the receiver signals completion.
 
 **Critical distinction:** Generator uses `write_ndx(f_out, NDX_DONE)` which produces 1 byte `0x00` on the daemon socket (compressed NDX, buffered output).  Receiver uses `write_int(f_out, NDX_DONE)` which produces 4 bytes `0xFFFFFFFF` on the internal pipe (fixed-width int, multiplexed output).
 
@@ -1419,6 +1431,21 @@ sum2[i] : raw[s2length]     // strong hash (MD4/MD5 = 16, SHA-256 = 32, etc)
 | XXH64/XXH3 | 8/16 | Seed as hash parameter |
 
 **`proper_seed_order`** is set via `CF_CHKSUM_SEED_FIX` compat flag (`.upstream/compat.c:759`, `proper_seed_order = compat_flags & CF_CHKSUM_SEED_FIX ? 1 : 0;`).
+
+### 12.4 Whole-file checksum (appended after each delta)
+
+After the delta token stream (terminated by the `0` token), the sender appends a 16-byte whole-file checksum (upstream `sum_end(file_sum)` + `write_buf(f, file_sum, MD4_SUM_LENGTH)` in `match_sums()`).  The receiver rebuilds the file, feeds it through its own streaming context, and compares -- on mismatch the update is discarded ("failed verification -- update discarded") and the file goes to the redo phase.
+
+The seed order of this streaming checksum is **opposite** to the block checksums' and depends on the negotiated protocol:
+
+| Proto | Algorithm | Seed order |
+|-------|-----------|------------|
+| < 30 | MD4 | `MD4(seed + data)` -- `sum_init()` feeds the 4-byte seed into the context before any data (`.upstream/checksum.c` v3.1.x, `void sum_init(int seed)`, pre-proto-30 branch; identical in v2.6.x) |
+| ≥ 30 | negotiated (default MD5) | `hash(data)` -- the streaming context is unseeded; the seed is used only by the block `get_checksum2()` path and the pre-transfer `--checksum` digests |
+
+Because both sides run the same code at the negotiated protocol, the order only matters when an implementation mixes versions -- a daemon serving a 2.6.x client at proto 27 must emit `MD4(seed + data)`.
+
+The seed itself is exchanged on **every** protocol version: `setup_protocol()` writes it unconditionally (`if (am_server) write_int(f_out, checksum_seed)` / else `checksum_seed = read_int(f_in)`, `.upstream/compat.c` in every inspected version from v2.6.0 to current).
 
 ## 13. Selector protocol (phase 13)
 

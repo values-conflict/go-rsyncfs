@@ -43,5 +43,3 @@ func NewServer(mods ...*ServerModule) (*Server, error) {
 	}
 	return &Server{modules: modules}, nil
 }
-
-

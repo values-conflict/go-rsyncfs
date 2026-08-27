@@ -307,30 +307,28 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 - Compat flags exchange
 - Algorithm negotiation when CF_VARINT_FLIST_FLAGS set
 
-### Task 14 -- Server: file list generation & data transfer
+### ~~Task 14 -- Server: file list generation & data transfer~~
 
-**Goal:** Implement the server-side file list walker and file data sender: walk backing FS to emit file list in rsync wire format, compute block checksums, and handle delta requests.
+**Goal:** Implement the server-side file list walker and file data sender: walk backing FS to emit file list in rsync wire format, compute block checksums, and answer delta requests.
 
-**Files:** `server-send.go`, `server-send_test.go`
+**Files:** `server-send.go` (transfer phase: `doServerSender`, `walk`, `sendFileList`, `sendFiles`, `sendFile`, `receiveSums`, `hashSearch`, `matchSums`, `sendStats`, `readFinalGoodbye`); the wire-level round-trip test lives in `server-handshake_test.go` (proto 27) and the real-client coverage in `integration_test.go`.
 
 **API:** Internal helpers composed within HandleConnection.
 
 **Key details:**
 
-- Walk backing fs.FS and emit file list entries via protocol.FlistWriter
-- Xmit flags encoding: varint when CF_VARINT_FLIST_FLAGS, byte/shortint otherwise
-- For data transfer: compute SumHead, send block checksums, read delta stream from client, transmit only mismatched blocks
-- Send MSG_SUCCESS with file index when done
-- Server reads selectors from raw connection (buffered I/O) and writes data through mux layer
+- Walk backing fs.FS and emit file list entries via protocol.FlistWriter, in upstream `f_name_cmp` order (the wire order is walk order; both sides sort before indexing)
+- Xmit flags encoding: varint when CF_VARINT_FLIST_FLAGS, byte/shortint otherwise; per-entry SAME_* omission flags, longint size / int32 fields below proto 30, varlong30 / varint from proto 30
+- For each selector: read the generator's SumHead + block sums, build the rolling-hash table (SUM2HASH2 fold), and stream a delta of only the mismatched regions; the response is the echoed selector, the echoed SumHead, the delta token stream, and the 16-byte whole-file checksum (seeded MD4 `MD4(seed + data)` below proto 30, plain digest from proto 30 on)
+- Non-transfer selectors (iflags, proto ≥ 29) are echoed without a body; below proto 29 every item is a transfer request
+- Phase exchange: int32 NDX_DONE packets below proto 30, compressed NDX from 30; the daemon echoes the generator's first NDX_DONE, breaks on the second, writes one trailing NDX_DONE after the loop, then the stats (3 longints below proto 29, 5 from 29; longint below 30, varlong30 from 30), then reads the final int32/NDX goodbye
+- I/O modes: raw in and raw out below proto 23; raw in with mux-framed out for proto 23-29 (only the daemon's stream is framed); bidirectional mux from proto 30.  Pending mux output is flushed before every read so an echo can never sit in the send buffer while the daemon blocks on the very read the client needs it for
 
 **Tests:**
 
-- Walk a MapFS and verify file list wire output
-- Xmit flag reuse: consecutive files with same attributes skip fields
-- Full file transfer through mux: verify checksums match
-- Zero-byte file (count=0, no data sent)
-- File that matches perfectly (no gaps to fill)
-- File that differs entirely (all blocks transmitted)
+- Full proto-27 round-trip over net.Pipe: greeting, module, newline args, seed, exclude list, framed flist (entry layout, end marker, id lists, io_error trailer), selector with null sum head, echoed response with seeded directory checksum, two-phase NDX_DONE exchange, stats, final goodbye
+- Xmit flag reuse: consecutive files with same attributes skip fields (FlistWriter unit tests)
+- End-to-end pull with real `rsync` clients from 2.6.0 (proto 27) through the current build (proto 32), byte-for-byte content verification
 
 ## Phase 3: Client
 
@@ -420,9 +418,9 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 ### Task 19 -- Upstream rsync integration tests
 
-**Goal:** Tests that connect our library to the real `rsync` binary.  Skipped with `-short` or when `rsync` is not found.
+**Goal:** Tests that connect our library to the real `rsync` binary.  Skipped with `-short` or when `rsync` is not found.  Prefer `.upstream/rsync` if it exists, then any `rsync` on `PATH`.
 
-**Files:** `integration_test.go`
+**Files:** `integration_test.go`, `protocol/args.go` (ExtractPreserveFlags), `server-handshake.go` (preserve flags propagation)
 
 **Tests (client-side):**
 
@@ -452,6 +450,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 - Each `rsync_<version>` client pulls from our Server
 - Verify transfers succeed across the full protocol version range our server supports
+- Version-safe CLI flags per binary: 2.6.0 predates `--log-file` / `-vvv`, so per-version flag sets (eg `-vlogDtpre` for the preserve bits on old builds)
 
 **Process management:** All started rsync processes must be killed on test completion.  No orphans.  Prefer Unix sockets.
 

@@ -64,15 +64,7 @@ func TestChecksum2_MD4(t *testing.T) {
 			want:     mustHex("99ebf48d202177937f084a873437b85e"),
 		},
 		{
-			name:     "seed-prepended",
-			data:     []byte("test data"),
-			s2Length: 16,
-			seed:     12345,
-			seedFix:  true,
-			want:     mustHex("eb879514747ef330c92f3464a972bb9d"),
-		},
-		{
-			name:     "seed-appended",
+			name:     "seed",
 			data:     []byte("test data"),
 			s2Length: 16,
 			seed:     12345,
@@ -96,6 +88,12 @@ func TestChecksum2_MD4(t *testing.T) {
 				t.Errorf("Checksum2(md4, %s) = %x, want %x", tc.name, got, tc.want)
 			}
 		})
+	}
+
+	// MD4 always appends the seed, so seedFix must not change the result.
+	data := []byte("test data")
+	if !bytes.Equal(Checksum2(data, "md4", 16, 12345, true), Checksum2(data, "md4", 16, 12345, false)) {
+		t.Error("md4 result changed with seedFix, want invariant")
 	}
 }
 
@@ -274,14 +272,8 @@ func TestChecksum2_ZeroSeed(t *testing.T) {
 }
 
 func TestChecksum2_SeedFixDifference(t *testing.T) {
-	// seedFix=true and seedFix=false must produce different results when seed != 0.
+	// MD5 branches on seedFix: prepended and appended seeds must differ.
 	data := []byte("test data")
-
-	md4Prepended := Checksum2(data, "md4", 16, 12345, true)
-	md4Appended := Checksum2(data, "md4", 16, 12345, false)
-	if bytes.Equal(md4Prepended, md4Appended) {
-		t.Error("md4 seedFix=true and seedFix=false produced identical results")
-	}
 
 	md5Prepended := Checksum2(data, "md5", 16, 12345, true)
 	md5Appended := Checksum2(data, "md5", 16, 12345, false)

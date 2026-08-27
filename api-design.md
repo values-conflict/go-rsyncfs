@@ -317,6 +317,12 @@ func Checksum1(data []byte) uint32
 // Returns the first s2Length bytes of the digest.
 func Checksum2(data []byte, digest string, s2Length int, seed int32, seedFix bool) []byte
 
+// FileChecksum computes the whole-file transfer checksum the sender appends
+// after each delta.  Below proto 30 it is the seeded streaming MD4,
+// MD4(seed + data) (seed fed into the context before any data); from proto 30
+// on it is the unseeded digest of the data.
+func FileChecksum(data []byte, digest string, version int, seed int32) []byte
+
 // SupportedDigests returns the list of checksum algorithms this library supports.
 func SupportedDigests() []string
 ```
@@ -392,11 +398,13 @@ type FlistEntry struct {
     RdevMinor  uint32  // for devices
     LinkTarget string  // for symlinks
     HlinkNdx   int32   // hard link target index (proto >= 30)
-    // For proto 28-29 hard links:
-    Dev  int64
-    Ino  int64
+    Nlink      int64   // link count (proto < 30 hard link presence)
+    Dev        int64   // proto < 30 hard link device (transmitted as-is)
+    Ino        int64   // proto < 30 hard link inode
     // Checksum for always_checksum files
     Checksum []byte
+    TopDir       bool // the transfer's root directory (XMIT_TOP_DIR)
+    NoContentDir bool // proto >= 30: contents are not in this list (XMIT_NO_CONTENT_DIR)
 }
 
 // FlistReader reads file list entries from a byte stream.
@@ -405,12 +413,36 @@ type FlistReader struct{}
 func NewFlistReader(r io.Reader, version int, varintFlistFlags bool) *FlistReader
 func (r *FlistReader) ReadEntry() (*FlistEntry, error) // returns io.EOF at end-of-list
 
+// The Set* methods mirror the preserve/feature flags the sender saw in the
+// client args; they must be set before ReadEntry so the reader knows which
+// conditional fields to expect.
+func (r *FlistReader) SetAtimes(enabled bool)
+func (r *FlistReader) SetCrtimes(enabled bool)
+func (r *FlistReader) SetPreserveUID(enabled bool)
+func (r *FlistReader) SetPreserveGID(enabled bool)
+func (r *FlistReader) SetPreserveDevices(enabled bool)
+func (r *FlistReader) SetPreserveLinks(enabled bool)
+func (r *FlistReader) SetPreserveHardlinks(enabled bool)
+func (r *FlistReader) SetAlwaysChecksum(enabled bool)
+func (r *FlistReader) SetIncRecurse(enabled bool)
+
 // FlistWriter writes file list entries to a writer.
 type FlistWriter struct{}
 
 func NewFlistWriter(w io.Writer, version int, varintFlistFlags bool) *FlistWriter
 func (w *FlistWriter) WriteEntry(e *FlistEntry) error
-func (w *FlistWriter) WriteEndMarker() error // xflags=0 + NDX_DONE
+func (w *FlistWriter) SetAtimes(enabled bool)
+func (w *FlistWriter) SetCrtimes(enabled bool)
+func (w *FlistWriter) SetPreserveUID(enabled bool)
+func (w *FlistWriter) SetPreserveGID(enabled bool)
+func (w *FlistWriter) SetPreserveDevices(enabled bool)
+func (w *FlistWriter) SetPreserveLinks(enabled bool)
+func (w *FlistWriter) SetPreserveHardlinks(enabled bool)
+func (w *FlistWriter) SetAlwaysChecksum(enabled bool)
+func (w *FlistWriter) SetID0Names(enabled bool)
+func (w *FlistWriter) WriteIDLists() error          // uid list then gid list, after the end marker
+func (w *FlistWriter) WriteIOErrorTrailer(ioError int) error
+func (w *FlistWriter) WriteEndMarker() error // xflags=0 (+ io_error on modern protocols)
 ```
 
 ### Selector wire format

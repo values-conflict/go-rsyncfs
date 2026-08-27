@@ -43,7 +43,8 @@ const (
 	XmitSameName         = 1 << 5
 	XmitLongName         = 1 << 6
 	XmitSameTime         = 1 << 7
-	XmitSameRdevMajor    = 1 << 8 // proto 28+ devices / proto 30+ dirs (NoContentDir)
+	XmitSameRdevMajor    = 1 << 8 // proto 28+ devices
+	XmitNoContentDir     = 1 << 8 // proto 30+ dirs: contents not in this list
 	XmitHlinked          = 1 << 9
 	XmitSameDevPre30     = 1 << 10 // proto 28-29
 	XmitUserNameFollows  = 1 << 10 // proto 30+

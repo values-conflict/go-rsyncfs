@@ -14,7 +14,11 @@ type Greeting struct {
 }
 
 // ParseGreeting parses a raw greeting line from an rsync server or client.
-// Format: "@RSYNCD: <version>.<subprotocol> <digests...>\n"
+// Format: "@RSYNCD: <version>[.<subprotocol>] [<digests>...]\n"
+//
+// The subprotocol is optional below version 30 (old clients send a bare
+// version); a missing subprotocol on version 30 or above is a protocol
+// error, matching exchange_protocols in clientserver.c.
 func ParseGreeting(line string) (*Greeting, error) {
 	line = strings.TrimSpace(line)
 
@@ -28,22 +32,22 @@ func ParseGreeting(line string) (*Greeting, error) {
 		return nil, fmt.Errorf("greeting missing version information")
 	}
 
-	// Parse version and subprotocol (e.g., "32.0")
-	verParts := strings.SplitN(parts[0], ".", 3)
-	if len(verParts) != 2 {
-		return nil, fmt.Errorf("invalid version format: %s", parts[0])
-	}
-
-	version, err := strconv.Atoi(verParts[0])
+	// Parse version and optional subprotocol (e.g., "32.0" or "27")
+	verMajor, verMinor, hasSub := strings.Cut(parts[0], ".")
+	version, err := strconv.Atoi(verMajor)
 	if err != nil {
 		return nil, fmt.Errorf("invalid protocol version: %w", err)
 	}
 
-	subProtoStr := verParts[1]
-	if len(subProtoStr) != 1 || subProtoStr[0] < '0' || subProtoStr[0] > '9' {
-		return nil, fmt.Errorf("invalid subprotocol format: %s", subProtoStr)
+	var subProtocol byte
+	if hasSub {
+		if len(verMinor) != 1 || verMinor[0] < '0' || verMinor[0] > '9' {
+			return nil, fmt.Errorf("invalid subprotocol format: %s", verMinor)
+		}
+		subProtocol = verMinor[0] - '0'
+	} else if version >= 30 {
+		return nil, fmt.Errorf("protocol version %d omitted the subprotocol value", version)
 	}
-	subProtocol := subProtoStr[0] - '0'
 
 	var digests []string
 	if len(parts) > 1 {

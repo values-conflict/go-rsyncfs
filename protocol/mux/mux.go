@@ -141,21 +141,24 @@ func (w *Writer) SendMsg(code uint8, payload []byte) error {
 }
 
 // writeFrame writes a single mux frame to the underlying writer.
+// Header format: 4-byte LE int32 with high byte = MPLEX_BASE + code, low 24 bits = length.
+// This matches upstream's SIVAL(hdr, 0, ((MPLEX_BASE+code)<<24) + len) format.
+// The header and payload are combined into a single write to avoid TCP segmentation
+// issues where the peer might process the header before the payload arrives.
 func (w *Writer) writeFrame(code uint8, payload []byte) error {
 	if len(payload) > 0xFFFFFF {
 		return ErrPayloadTooLarge
 	}
 
-	var hdr [4]byte
-	binary.LittleEndian.PutUint32(hdr[:], uint32(mplexBase+code)<<24|uint32(len(payload)))
-	if _, err := w.w.Write(hdr[:]); err != nil {
-		return err
-	}
+	// Combine header + payload into a single write.
+	// Header is a LE int32: high byte = code, low 24 bits = length.
+	combined := make([]byte, 4+len(payload))
+	binary.LittleEndian.PutUint32(combined, uint32(mplexBase+code)<<24|uint32(len(payload)))
 	if len(payload) > 0 {
-		_, err := w.w.Write(payload)
-		return err
+		copy(combined[4:], payload)
 	}
-	return nil
+	_, err := w.w.Write(combined)
+	return err
 }
 
 // Reader reads multiplexed frames from an [io.Reader].
@@ -253,11 +256,10 @@ func (r *Reader) readFrame() (code uint8, payload []byte, err error) {
 		return 0, nil, err
 	}
 
-	val := binary.LittleEndian.Uint32(hdr[:])
-	msgCode := val >> 24
-	payloadLen := uint32(val & 0xFFFFFF)
-
-	code = uint8(msgCode - mplexBase)
+	// Header is a LE int32: high byte = MPLEX_BASE + code, low 24 bits = length.
+	tag := binary.LittleEndian.Uint32(hdr[:])
+	code = uint8((tag >> 24) - mplexBase)
+	payloadLen := tag & 0xFFFFFF
 
 	payload = make([]byte, payloadLen)
 	if payloadLen > 0 {

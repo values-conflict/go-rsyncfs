@@ -102,6 +102,29 @@ func ExtractClientInfo(args []string) string {
 	return ""
 }
 
+// ExtractPreserveFlags checks the combined short-option flags for 'o' (owner),
+// 'g' (group), and 'H' (hard links).  It returns (preserveUID, preserveGID,
+// preserveHlinks) matching the upstream daemon's preserve_uid/preserve_gid/
+// preserve_hard_links settings derived from the client's argument string.
+func ExtractPreserveFlags(args []string) (preserveUID, preserveGID, preserveHlinks bool) {
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") {
+			continue
+		}
+		for _, ch := range arg {
+			switch ch {
+			case 'o':
+				preserveUID = true
+			case 'g':
+				preserveGID = true
+			case 'H':
+				preserveHlinks = true
+			}
+		}
+	}
+	return
+}
+
 // ResolveCompatFlags builds the server's compat flags based on its capabilities
 // (serverCaps) and the client's advertised feature flags (clientInfo).  Only
 // flags that both sides support are set in the result.

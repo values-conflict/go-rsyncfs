@@ -205,12 +205,13 @@ func TestFlistWireFormat(t *testing.T) {
 	if len(data) < 1 {
 		t.Fatal("no data written")
 	}
-	// first byte should have XmitSameUID|XmitSameGID set (matching zero-value delta state)
-	if data[0]&XmitSameUID == 0 {
-		t.Errorf("first byte 0x%02x missing XmitSameUID (zero-value delta match)", data[0])
+	// first entry should NOT have XmitSameUID|XmitSameGID (no previous entry to match)
+	// this matches upstream which checks *lastname before setting SAME flags
+	if data[0]&XmitSameUID != 0 {
+		t.Errorf("first byte 0x%02x has unexpected XmitSameUID (no prior entry)", data[0])
 	}
-	if data[0]&XmitSameGID == 0 {
-		t.Errorf("first byte 0x%02x missing XmitSameGID (zero-value delta match)", data[0])
+	if data[0]&XmitSameGID != 0 {
+		t.Errorf("first byte 0x%02x has unexpected XmitSameGID (no prior entry)", data[0])
 	}
 	// last byte should be 0 (end marker)
 	if data[len(data)-1] != 0 {
@@ -251,10 +252,11 @@ func TestFlistZeroSentinel(t *testing.T) {
 
 func TestFlistWireFormatExtendedFlags(t *testing.T) {
 	// verify shortint xflags for proto 28+ when high bits set
+	// XmitModNsec is bit 13 (requires extended flags) and only exists in proto 31+
 	var buf bytes.Buffer
-	w := NewFlistWriter(&buf, 28, false)
+	w := NewFlistWriter(&buf, 31, false)
 
-	// write entry with high-bit flag (XmitModNsec is bit 13, requires extended flags)
+	// write entry with high-bit flag
 	if err := w.WriteEntry(&FlistEntry{
 		Name:    "file.txt",
 		Mode:    0o100644,
@@ -383,8 +385,8 @@ func TestFlistUserNameFollows(t *testing.T) {
 
 func TestCommonPrefixLen(t *testing.T) {
 	tests := []struct {
-		a, b   string
-		want   int
+		a, b string
+		want int
 	}{
 		{"", "", 0},
 		{"abc", "abc", 3},

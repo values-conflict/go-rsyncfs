@@ -6,5 +6,3 @@
 - should we summarize the relevant tianonfmt rules here somewhere so they're easier/quicker to reference?  maybe make the upstream tianonfmt docs themselves tighter somehow?
 
 - can we somehow get creative with the `net.Pipe` usage / tests to avoid the goroutines entirely?
-
-- if `.upstream/rsync` exists, `integration_test.go` should prefer it (maybe even before consulting `PATH`? we should explore pros/cons of this)

@@ -20,47 +20,57 @@ type FlistEntry struct {
 	RdevMinor  uint32 // for devices
 	LinkTarget string // for symlinks
 	HlinkNdx   int32  // hard link target index (proto >= 30)
-	// For proto 28-29 hard links:
-	Dev int64
-	Ino int64
+	// Hard link identity: the link count and the device/inode pair
+	// (proto < 30 wire data; the writer decides presence from the
+	// protocol version and preserve_hard_links).
+	Nlink int64
+	Dev   int64
+	Ino   int64
 	// Checksum for always_checksum files
 	Checksum []byte
+
+	// Directory classification (upstream FLAG_TOP_DIR / FLAG_NO_CONTENT_DIR,
+	// carried by XMIT_TOP_DIR / XMIT_NO_CONTENT_DIR).  Only meaningful for
+	// directory entries: below proto 30 a TOP_DIR bit on a non-directory is
+	// just a non-zero placeholder and is not read back as a flag.
+	TopDir       bool // the transfer's root directory
+	NoContentDir bool // proto >= 30: contents are not in this list
 }
 
 // FlistReader reads file list entries from a byte stream.
 type FlistReader struct {
-	r                  io.Reader
-	version            int
-	varintFlistFlags   bool
-	hasAtimes          bool
-	hasCrtimes         bool
-	preserveUID        bool
-	preserveGID        bool
-	preserveDevices    bool
-	preserveLinks      bool
-	preserveHardlinks  bool
-	alwaysChecksum     bool
-	incRecurse         bool
-	lastMode           uint32
-	lastUID            int32
-	lastGID            int32
-	lastMtime          int64
-	lastAtime          int64
-	lastRdevMajor      uint32
-	lastName           string
-	lastDir            int64 // proto 28-29 dev tracking
+	r                 io.Reader
+	version           int
+	varintFlistFlags  bool
+	hasAtimes         bool
+	hasCrtimes        bool
+	preserveUID       bool
+	preserveGID       bool
+	preserveDevices   bool
+	preserveLinks     bool
+	preserveHardlinks bool
+	alwaysChecksum    bool
+	incRecurse        bool
+	lastMode          uint32
+	lastUID           int32
+	lastGID           int32
+	lastMtime         int64
+	lastAtime         int64
+	lastRdevMajor     uint32
+	lastName          string
+	lastDir           int64 // proto 28-29 dev tracking
 }
 
 // NewFlistReader creates a new FlistReader.
 func NewFlistReader(r io.Reader, version int, varintFlistFlags bool) *FlistReader {
 	return &FlistReader{
-		r:                r,
-		version:          version,
-		varintFlistFlags: varintFlistFlags,
-		preserveUID:      true,
-		preserveGID:      true,
-		preserveDevices:  true,
-		preserveLinks:    true,
+		r:                 r,
+		version:           version,
+		varintFlistFlags:  varintFlistFlags,
+		preserveUID:       true,
+		preserveGID:       true,
+		preserveDevices:   true,
+		preserveLinks:     true,
 		preserveHardlinks: true,
 	}
 }
@@ -99,6 +109,11 @@ func (r *FlistReader) ReadEntry() (*FlistEntry, error) {
 		return nil, err
 	}
 	if xflags == 0 {
+		// For varint flags, consume the io_error value after the end marker.
+		// For non-varint flags, io_error is sent separately (XMIT_IO_ERROR_ENDLIST).
+		if r.varintFlistFlags {
+			_, _ = ReadVarint(r.r) // io_error, typically 0
+		}
 		return nil, io.EOF
 	}
 
@@ -152,8 +167,12 @@ func (r *FlistReader) ReadEntry() (*FlistEntry, error) {
 		}
 	}
 
-	// file size
-	entry.Size, err = ReadVarlong(r.r, 3)
+	// file size: longint below proto 30, varlong30 from there on
+	if r.version < 30 {
+		entry.Size, err = ReadLongInt(r.r)
+	} else {
+		entry.Size, err = ReadVarlong(r.r, 3)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -195,6 +214,14 @@ func (r *FlistReader) ReadEntry() (*FlistEntry, error) {
 		r.lastMode = v
 	} else {
 		entry.Mode = r.lastMode
+	}
+
+	// directory classification (upstream sets these flags only for
+	// S_ISDIR entries; on non-dirs the TOP_DIR bit is a non-zero
+	// placeholder below proto 30)
+	if (entry.Mode & 0o170000) == 0o040000 {
+		entry.TopDir = xflags&XmitTopDir != 0
+		entry.NoContentDir = xflags&XmitNoContentDir != 0
 	}
 
 	// atime
@@ -276,30 +303,26 @@ func (r *FlistReader) ReadEntry() (*FlistEntry, error) {
 	isDevice := (entry.Mode&0o170000) == 0o020000 || (entry.Mode&0o170000) == 0o060000
 	if r.preserveDevices && isDevice {
 		if r.version < 28 {
+			// the full packed dev_t as a single int32
 			if xflags&XmitSameRdevMajor == 0 { // XMIT_SAME_RDEV_pre28 shares bit 8
 				v, err := ReadUint32(r.r)
 				if err != nil {
 					return nil, err
 				}
-				entry.RdevMajor = v
+				entry.RdevMajor = v >> 8
+				entry.RdevMinor = v & 0xFF
 			}
-		} else {
+		} else if r.version < 30 {
 			if xflags&XmitSameRdevMajor == 0 {
-				v, err := ReadVarint(r.r)
+				v, err := ReadUint32(r.r)
 				if err != nil {
 					return nil, err
 				}
-				entry.RdevMajor = uint32(v)
+				entry.RdevMajor = v
 			} else {
 				entry.RdevMajor = r.lastRdevMajor
 			}
-			if r.version >= 30 {
-				v, err := ReadVarint(r.r)
-				if err != nil {
-					return nil, err
-				}
-				entry.RdevMinor = uint32(v)
-			} else if xflags&XmitRdevMinor8Pre30 != 0 {
+			if xflags&XmitRdevMinor8Pre30 != 0 {
 				b, err := readByte(r.r)
 				if err != nil {
 					return nil, err
@@ -312,11 +335,26 @@ func (r *FlistReader) ReadEntry() (*FlistEntry, error) {
 				}
 				entry.RdevMinor = v
 			}
+		} else {
+			if xflags&XmitSameRdevMajor == 0 {
+				v, err := ReadVarint(r.r)
+				if err != nil {
+					return nil, err
+				}
+				entry.RdevMajor = uint32(v)
+			} else {
+				entry.RdevMajor = r.lastRdevMajor
+			}
+			v, err := ReadVarint(r.r)
+			if err != nil {
+				return nil, err
+			}
+			entry.RdevMinor = uint32(v)
 		}
 	}
 
-	// symlink target
-	isSymlink := (entry.Mode&0o170000) == 0o120000
+	// symlink target -- length is varint30 in every protocol version
+	isSymlink := (entry.Mode & 0o170000) == 0o120000
 	if r.preserveLinks && isSymlink {
 		lenVal, err := ReadVarint(r.r)
 		if err != nil {
@@ -331,8 +369,17 @@ func (r *FlistReader) ReadEntry() (*FlistEntry, error) {
 		}
 	}
 
-	// hard link dev/ino (proto 28-29)
-	if r.preserveHardlinks && (xflags&XmitHlinked != 0) && r.version < 30 {
+	// hard link dev/ino (proto < 30).  Below proto 28 every regular
+	// file carries the pair unconditionally; proto 28-29 only the
+	// flagged entries do.
+	// The dev is transmitted as-is (the 1-incremented convention only
+	// exists in the >= 3.1 daemons' outgoing stream; the 2.6.x peers
+	// that negotiate sub-30 protocols read it raw).
+	isReg := (entry.Mode & 0o170000) == 0o100000
+	readHlink := r.version < 30 &&
+		((r.version < 28 && r.preserveHardlinks && isReg) ||
+			(r.version >= 28 && xflags&XmitHlinked != 0))
+	if readHlink {
 		if r.version < 26 {
 			v1, err := ReadUint32(r.r)
 			if err != nil {
@@ -342,7 +389,7 @@ func (r *FlistReader) ReadEntry() (*FlistEntry, error) {
 			if err != nil {
 				return nil, err
 			}
-			entry.Dev = int64(v1) - 1 // undo the +1 increment
+			entry.Dev = int64(v1)
 			entry.Ino = int64(v2)
 		} else {
 			if xflags&XmitSameDevPre30 == 0 {
@@ -350,7 +397,6 @@ func (r *FlistReader) ReadEntry() (*FlistEntry, error) {
 				if err != nil {
 					return nil, err
 				}
-				entry.Dev-- // undo the +1 increment
 			}
 			entry.Ino, err = ReadLongInt(r.r)
 			if err != nil {
@@ -359,10 +405,9 @@ func (r *FlistReader) ReadEntry() (*FlistEntry, error) {
 		}
 	}
 
-	// checksum (always_checksum)
-	if r.alwaysChecksum && (entry.Mode&0o170000) == 0o100000 {
-		// flist_csum_len is typically 16 (MD4) or 16 (MD5)
-		// we read 16 bytes as the standard checksum length
+	// checksum (always_checksum) -- proto < 28 sent a (null) checksum for
+	// every entry, not just regular files
+	if r.alwaysChecksum && ((entry.Mode&0o170000) == 0o100000 || r.version < 28) {
 		csum := make([]byte, 16)
 		if _, err := io.ReadFull(r.r, csum); err != nil {
 			return nil, err
@@ -405,25 +450,26 @@ func (r *FlistReader) readXflags() (int, error) {
 
 // FlistWriter writes file list entries to a writer.
 type FlistWriter struct {
-	w                  io.Writer
-	version            int
-	varintFlistFlags   bool
-	hasAtimes          bool
-	hasCrtimes         bool
-	preserveUID        bool
-	preserveGID        bool
-	preserveDevices    bool
-	preserveLinks      bool
-	preserveHardlinks  bool
-	alwaysChecksum     bool
-	lastMode           uint32
-	lastUID            int32
-	lastGID            int32
-	lastMtime          int64
-	lastAtime          int64
-	lastRdevMajor      uint32
-	lastName           string
-	lastDir            int64 // proto 28-29 dev tracking
+	w                 io.Writer
+	version           int
+	varintFlistFlags  bool
+	hasAtimes         bool
+	hasCrtimes        bool
+	preserveUID       bool
+	preserveGID       bool
+	preserveDevices   bool
+	preserveLinks     bool
+	preserveHardlinks bool
+	alwaysChecksum    bool
+	id0Names          bool
+	lastMode          uint32
+	lastUID           int32
+	lastGID           int32
+	lastMtime         int64
+	lastAtime         int64
+	lastRdevMajor     uint32
+	lastDev           int64 // proto 28-29 hard link dev tracking
+	lastName          string
 }
 
 // NewFlistWriter creates a new FlistWriter.
@@ -464,9 +510,10 @@ func (w *FlistWriter) SetPreserveHardlinks(enabled bool) { w.preserveHardlinks =
 // SetAlwaysChecksum controls whether checksum fields are written.
 func (w *FlistWriter) SetAlwaysChecksum(enabled bool) { w.alwaysChecksum = enabled }
 
-// WriteEntry writes a file list entry.
+// WriteEntry writes a file list entry, matching upstream send_file_entry()
+// field order and delta-encoding rules.
 func (w *FlistWriter) WriteEntry(e *FlistEntry) error {
-	xflags := computeXflags(e, w.lastMode, w.lastUID, w.lastGID, w.lastMtime, w.lastAtime, w.lastRdevMajor, w.lastName, w.hasAtimes)
+	xflags := w.computeXflags(e)
 
 	// write xflags
 	if err := writeXflags(w.w, xflags, e.Mode, w.version, w.varintFlistFlags); err != nil {
@@ -507,9 +554,15 @@ func (w *FlistWriter) WriteEntry(e *FlistEntry) error {
 		return nil
 	}
 
-	// file size
-	if err := WriteVarlong(w.w, e.Size, 3); err != nil {
-		return err
+	// file size: longint below proto 30, varlong30 from there on
+	if w.version < 30 {
+		if err := WriteLongInt(w.w, e.Size); err != nil {
+			return err
+		}
+	} else {
+		if err := WriteVarlong(w.w, e.Size, 3); err != nil {
+			return err
+		}
 	}
 
 	// mtime
@@ -601,8 +654,25 @@ func (w *FlistWriter) WriteEntry(e *FlistEntry) error {
 	isDevice := (e.Mode&0o170000) == 0o020000 || (e.Mode&0o170000) == 0o060000
 	if w.preserveDevices && isDevice {
 		if w.version < 28 {
+			// the full packed dev_t as a single int32
 			if xflags&XmitSameRdevMajor == 0 { // XMIT_SAME_RDEV_pre28 shares bit 8
+				if err := WriteUint32(w.w, packRdev(e.RdevMajor, e.RdevMinor)); err != nil {
+					return err
+				}
+			}
+		} else if w.version < 30 {
+			if xflags&XmitSameRdevMajor == 0 {
 				if err := WriteUint32(w.w, e.RdevMajor); err != nil {
+					return err
+				}
+				w.lastRdevMajor = e.RdevMajor
+			}
+			if xflags&XmitRdevMinor8Pre30 != 0 {
+				if err := writeByte(w.w, byte(e.RdevMinor)); err != nil {
+					return err
+				}
+			} else {
+				if err := WriteUint32(w.w, e.RdevMinor); err != nil {
 					return err
 				}
 			}
@@ -613,24 +683,14 @@ func (w *FlistWriter) WriteEntry(e *FlistEntry) error {
 				}
 				w.lastRdevMajor = e.RdevMajor
 			}
-			if w.version >= 30 {
-				if err := WriteVarint(w.w, int32(e.RdevMinor)); err != nil {
-					return err
-				}
-			} else if xflags&XmitRdevMinor8Pre30 != 0 {
-				if err := writeByte(w.w, byte(e.RdevMinor)); err != nil {
-					return err
-				}
-			} else {
-				if err := WriteUint32(w.w, e.RdevMinor); err != nil {
-					return err
-				}
+			if err := WriteVarint(w.w, int32(e.RdevMinor)); err != nil {
+				return err
 			}
 		}
 	}
 
-	// symlink target
-	isSymlink := (e.Mode&0o170000) == 0o120000
+	// symlink target -- length is varint30 in every protocol version
+	isSymlink := (e.Mode & 0o170000) == 0o120000
 	if w.preserveLinks && isSymlink {
 		if err := WriteVarint(w.w, int32(len(e.LinkTarget))); err != nil {
 			return err
@@ -642,10 +702,19 @@ func (w *FlistWriter) WriteEntry(e *FlistEntry) error {
 		}
 	}
 
-	// hard link dev/ino (proto 28-29)
-	if w.preserveHardlinks && (xflags&XmitHlinked != 0) && w.version < 30 {
+	// hard link dev/ino (proto < 30).  Below proto 28 every regular
+	// file carries the pair unconditionally (no flag byte); proto 28-29
+	// carry it only for the flagged (multiple-link) entries, the flag
+	// being computed in computeXflags.  The 2.6.x peers that negotiate
+	// sub-30 protocols expect the dev number as-is (the 1-incremented
+	// variant exists only in the outgoing stream of >= 3.1 daemons).
+	isReg := (e.Mode & 0o170000) == 0o100000
+	hlink := w.version < 30 &&
+		((w.version < 28 && w.preserveHardlinks && isReg) ||
+			(w.version >= 28 && xflags&XmitHlinked != 0))
+	if hlink {
 		if w.version < 26 {
-			if err := WriteUint32(w.w, uint32(e.Dev+1)); err != nil { // +1 increment
+			if err := WriteUint32(w.w, uint32(e.Dev)); err != nil {
 				return err
 			}
 			if err := WriteUint32(w.w, uint32(e.Ino)); err != nil {
@@ -653,7 +722,7 @@ func (w *FlistWriter) WriteEntry(e *FlistEntry) error {
 			}
 		} else {
 			if xflags&XmitSameDevPre30 == 0 {
-				if err := WriteLongInt(w.w, e.Dev+1); err != nil { // +1 increment
+				if err := WriteLongInt(w.w, e.Dev); err != nil {
 					return err
 				}
 			}
@@ -663,41 +732,110 @@ func (w *FlistWriter) WriteEntry(e *FlistEntry) error {
 		}
 	}
 
-	// checksum (always_checksum)
-	if w.alwaysChecksum && (e.Mode&0o170000) == 0o100000 {
-		if len(e.Checksum) > 0 {
-			if _, err := w.w.Write(e.Checksum); err != nil {
-				return err
-			}
+	// checksum (always_checksum) -- proto < 28 sent a (null) checksum for
+	// every entry, not just regular files
+	if w.alwaysChecksum && ((e.Mode&0o170000) == 0o100000 || w.version < 28) {
+		csum := e.Checksum
+		if len(csum) == 0 {
+			csum = make([]byte, 16)
+		}
+		if _, err := w.w.Write(csum); err != nil {
+			return err
 		}
 	}
 
 	return nil
 }
 
+// SetID0Names enables the id-0 name extension (CF_ID0_NAMES negotiated):
+// each id list terminator carries an (empty) name for id 0.
+func (w *FlistWriter) SetID0Names(enabled bool) { w.id0Names = enabled }
+
+// WriteIDLists writes the uid/gid name lists that follow the end marker when
+// uid/gid preservation is on (upstream send_id_lists).  This writer never
+// resolves names, so each preserved id space contributes only its terminator:
+// a zero id (int32 for proto < 30, varint for proto >= 30) followed by an
+// empty name when [FlistWriter.SetID0Names] is enabled.
+func (w *FlistWriter) WriteIDLists() error {
+	for _, preserve := range [2]bool{w.preserveUID, w.preserveGID} {
+		if !preserve {
+			continue
+		}
+		if w.version >= 30 {
+			if err := WriteVarint(w.w, 0); err != nil {
+				return err
+			}
+		} else {
+			if err := WriteInt32(w.w, 0); err != nil {
+				return err
+			}
+		}
+		if w.id0Names {
+			if err := writeByte(w.w, 0); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// WriteIOErrorTrailer writes the int32 io_error value that terminates the
+// file list for proto < 30 (upstream send_file_list).  For proto >= 30 the
+// io_error travels as an MSG_IO_ERROR message and the trailer is a no-op.
+func (w *FlistWriter) WriteIOErrorTrailer(ioError int) error {
+	if w.version >= 30 {
+		return nil
+	}
+	return WriteInt32(w.w, int32(ioError))
+}
+
 // WriteEndMarker writes the end-of-list marker (xflags = 0).
 func (w *FlistWriter) WriteEndMarker() error {
 	if w.varintFlistFlags {
-		return WriteVarint(w.w, 0)
+		// varint flags: end marker (0) + io_error (0)
+		if err := WriteVarint(w.w, 0); err != nil {
+			return err
+		}
+		return WriteVarint(w.w, 0) // io_error = 0
 	}
 	return writeByte(w.w, 0)
 }
 
-// computeXflags calculates the delta-encoding xmit flags for a file entry.
-func computeXflags(e *FlistEntry, lastMode uint32, lastUID, lastGID int32, lastMtime, lastAtime int64, lastRdevMajor uint32, lastName string, hasAtimes bool) int {
+// computeXflags calculates the delta-encoding xmit flags for a file entry,
+// mirroring upstream send_file_entry() flag construction.
+func (w *FlistWriter) computeXflags(e *FlistEntry) int {
 	xflags := 0
+	lastName := w.lastName
+	isDir := (e.Mode & 0o170000) == 0o040000
 
-	if e.Mode == lastMode {
+	// the base flag of a directory (upstream send_file_entry):
+	// proto >= 30 content dirs carry only the TOP_DIR bit when they are
+	// the root; non-content dirs carry NO_CONTENT_DIR (or both, for an
+	// implied parent); below proto 30 only TOP_DIR exists
+	if isDir {
+		if w.version >= 30 && e.NoContentDir {
+			xflags |= XmitNoContentDir
+			if e.TopDir {
+				xflags |= XmitTopDir
+			}
+		} else if e.TopDir {
+			xflags |= XmitTopDir
+		}
+	}
+
+	if e.Mode == w.lastMode {
 		xflags |= XmitSameMode
 	}
-	if e.Mtime == lastMtime {
-		xflags |= XmitSameTime
-	}
-	if e.UID == lastUID {
+	// uid/gid: the SAME flag is set whenever the field is not preserved at
+	// all, or the value matches the previous entry (which must exist)
+	if !w.preserveUID || (lastName != "" && e.UID == w.lastUID) {
 		xflags |= XmitSameUID
 	}
-	if e.GID == lastGID {
+	if !w.preserveGID || (lastName != "" && e.GID == w.lastGID) {
 		xflags |= XmitSameGID
+	}
+	if e.Mtime == w.lastMtime {
+		xflags |= XmitSameTime
 	}
 
 	// name prefix matching
@@ -710,21 +848,26 @@ func computeXflags(e *FlistEntry, lastMode uint32, lastUID, lastGID int32, lastM
 		xflags |= XmitLongName
 	}
 
-	// mod_nsec
-	if e.ModNsec != 0 {
+	// mod_nsec -- only exists in proto 31 and later
+	if w.version >= 31 && e.ModNsec != 0 {
 		xflags |= XmitModNsec
 	}
 
 	// atime -- only when atimes are tracked and entry is not a directory
-	isDir := (e.Mode&0o170000) == 0o040000
-	if hasAtimes && !isDir && e.Atime == lastAtime {
+	if w.hasAtimes && !isDir && e.Atime == w.lastAtime {
 		xflags |= XmitSameAtime
 	}
 
-	// rdev major -- only for device files
-	isDevice := (e.Mode&0o170000) == 0o020000 || (e.Mode&0o170000) == 0o060000
-	if isDevice && e.RdevMajor == lastRdevMajor {
-		xflags |= XmitSameRdevMajor
+	// hard link flag (proto 28-29): carried by the multiple-link
+	// non-directory entries; the dev number is omitted when it repeats
+	// the previous one (upstream XMIT_SAME_DEV_pre30)
+	if w.version >= 28 && w.version < 30 && w.preserveHardlinks && !isDir && e.Nlink > 1 {
+		if e.Dev == w.lastDev {
+			xflags |= XmitSameDevPre30
+		} else {
+			w.lastDev = e.Dev
+		}
+		xflags |= XmitHlinked
 	}
 
 	return xflags
@@ -742,7 +885,7 @@ func writeXflags(w io.Writer, xflags int, mode uint32, version int, varintFlistF
 
 	if version >= 28 {
 		// avoid sending zero (signals end-of-list)
-		isDir := (mode&0o170000) == 0o040000
+		isDir := (mode & 0o170000) == 0o040000
 		if xflags == 0 && !isDir {
 			xflags |= XmitTopDir
 		}
@@ -754,7 +897,7 @@ func writeXflags(w io.Writer, xflags int, mode uint32, version int, varintFlistF
 	}
 
 	// proto < 28: single byte, avoid zero
-	isDir := (mode&0o170000) == 0o040000
+	isDir := (mode & 0o170000) == 0o040000
 	if xflags == 0 {
 		if isDir {
 			xflags = XmitLongName
@@ -763,6 +906,12 @@ func writeXflags(w io.Writer, xflags int, mode uint32, version int, varintFlistF
 		}
 	}
 	return writeByte(w, byte(xflags))
+}
+
+// packRdev packs a device major/minor pair into the legacy 32-bit dev_t
+// layout used by the pre-28 device encoding (major in the high bits).
+func packRdev(major, minor uint32) uint32 {
+	return (major << 8) | (minor & 0xFF)
 }
 
 // commonPrefixLen returns the length of the common prefix between a and b, capped at 255.

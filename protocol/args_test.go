@@ -204,6 +204,81 @@ func TestExtractClientInfo(t *testing.T) {
 	}
 }
 
+func TestExtractPreserveFlags(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantUID bool
+		wantGID bool
+		wantHLD bool
+	}{
+		{
+			name:    "no preserve flags",
+			args:    []string{"--server", "--sender", "-vvvvre.iLsfxCIvu", ".", "testmod/"},
+			wantUID: false,
+			wantGID: false,
+			wantHLD: false,
+		},
+		{
+			name:    "with owner flag",
+			args:    []string{"--server", "--sender", "-vlore.iLsfxCIvu", ".", "testmod/"},
+			wantUID: true,
+			wantGID: false,
+			wantHLD: false,
+		},
+		{
+			name:    "with group flag",
+			args:    []string{"--server", "--sender", "-vgre.iLsfxCIvu", ".", "testmod/"},
+			wantUID: false,
+			wantGID: true,
+			wantHLD: false,
+		},
+		{
+			name:    "with both flags",
+			args:    []string{"--server", "--sender", "-vlogre.iLsfxCIvu", ".", "testmod/"},
+			wantUID: true,
+			wantGID: true,
+			wantHLD: false,
+		},
+		{
+			name:    "archive implies both",
+			args:    []string{"--server", "--sender", "-vare.iLsfxCIvu", ".", "testmod/"},
+			wantUID: false, // 'a' is not 'o' or 'g', so not matched
+			wantGID: false,
+			wantHLD: false,
+		},
+		{
+			name:    "with hard link flag",
+			args:    []string{"--server", "--sender", "-vHre.iLsfxCIvu", ".", "testmod/"},
+			wantUID: false,
+			wantGID: false,
+			wantHLD: true,
+		},
+		{
+			name:    "empty args",
+			args:    []string{},
+			wantUID: false,
+			wantGID: false,
+			wantHLD: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotUID, gotGID, gotHLD := ExtractPreserveFlags(tt.args)
+			if gotUID != tt.wantUID {
+				t.Errorf("ExtractPreserveFlags(%v) preserveUID = %v, want %v", tt.args, gotUID, tt.wantUID)
+			}
+			if gotGID != tt.wantGID {
+				t.Errorf("ExtractPreserveFlags(%v) preserveGID = %v, want %v", tt.args, gotGID, tt.wantGID)
+			}
+			if gotHLD != tt.wantHLD {
+				t.Errorf("ExtractPreserveFlags(%v) preserveHlinks = %v, want %v", tt.args, gotHLD, tt.wantHLD)
+			}
+		})
+	}
+}
+
 func TestResolveCompatFlags(t *testing.T) {
 	allCaps := CompatIncRecurse | CompatSymlinkTimes | CompatSymlinkIconv |
 		CompatSafeFlist | CompatAvoidXattrOptim | CompatChksumSeedFix |

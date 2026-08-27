@@ -30,56 +30,34 @@ func Checksum1(data []byte) uint32 {
 	return (s1 & 0xffff) | (s2 << 16)
 }
 
-// Checksum2 computes the strong hash with seed.
-// When seedFix is true (CF_CHKSUM_SEED_FIX), seed is prepended: hash(seed + data).
-// When seedFix is false, seed is appended: hash(data + seed).
-// Returns the first s2Length bytes of the digest.
+// Checksum2 computes the strong hash with the checksum seed.  The seed is a 4-byte little-endian value mixed into the digest only when non-zero.  For MD4 the seed is always appended after the data (hash(data || seed)); for MD5 the seedFix flag (CF_CHKSUM_SEED_FIX negotiated) controls the order: true prepends the seed (hash(seed || data)), false appends it (hash(data || seed)).  Returns the first s2Length bytes of the digest.
 //
 // Supported digest names: "md4", "md5".
-// Source: .upstream/checksum.c:320-384, `void get_checksum2(char *buf, int32 len, char *sum)`.
+// Source: .upstream/checksum.c, `void get_checksum2(char *buf, int32 len, char *sum)` -- the MD4 path copies data into a scratch buffer and appends the seed in place, so it is always data-then-seed regardless of proper_seed_order; only the MD5 path branches on it.
 func Checksum2(data []byte, digest string, s2Length int, seed int32, seedFix bool) []byte {
 	var result []byte
+	var seedBuf [4]byte
+	if seed != 0 {
+		binary.LittleEndian.PutUint32(seedBuf[:], uint32(seed))
+	}
 
 	switch digest {
 	case "md4":
 		h := md4.New()
+		h.Write(data)
 		if seed != 0 {
-			if seedFix {
-				// seed prepended: hash(seed + data)
-				var seedBuf [4]byte
-				binary.LittleEndian.PutUint32(seedBuf[:], uint32(seed))
-				h.Write(seedBuf[:])
-			}
-			h.Write(data)
-			if !seedFix {
-				// seed appended: hash(data + seed)
-				var seedBuf [4]byte
-				binary.LittleEndian.PutUint32(seedBuf[:], uint32(seed))
-				h.Write(seedBuf[:])
-			}
-		} else {
-			h.Write(data)
+			h.Write(seedBuf[:])
 		}
 		result = h.Sum(nil)
 
 	case "md5":
 		h := md5.New()
-		if seed != 0 {
-			if seedFix {
-				// seed prepended: hash(seed + data)
-				var seedBuf [4]byte
-				binary.LittleEndian.PutUint32(seedBuf[:], uint32(seed))
-				h.Write(seedBuf[:])
-			}
-			h.Write(data)
-			if !seedFix {
-				// seed appended: hash(data + seed)
-				var seedBuf [4]byte
-				binary.LittleEndian.PutUint32(seedBuf[:], uint32(seed))
-				h.Write(seedBuf[:])
-			}
-		} else {
-			h.Write(data)
+		if seed != 0 && seedFix {
+			h.Write(seedBuf[:])
+		}
+		h.Write(data)
+		if seed != 0 && !seedFix {
+			h.Write(seedBuf[:])
 		}
 		result = h.Sum(nil)
 
@@ -92,6 +70,41 @@ func Checksum2(data []byte, digest string, s2Length int, seed int32, seedFix boo
 		return result[:s2Length]
 	}
 	return result
+}
+
+// FileChecksum computes the whole-file transfer checksum that the sender
+// appends after each delta.  The receiver rebuilds the file, feeds it
+// through its own streaming sum, and compares -- so this must mirror the
+// receiver's sum_init/sum_update/sum_end for the negotiated protocol
+// version.  From proto 30 on the streaming sum ignores the seed (plain
+// digest of the content); below that the legacy MD4 streaming sum feeds
+// the seed into the context first, so the digest is MD4(seed || data).
+//
+// Supported digest names: "md4", "md5" (only md4 applies below proto 30).
+// Source: .upstream/checksum.c, `void sum_init(int seed)` in v3.1.x (the
+// pre-proto-30 branch seeds the MD4 context before any data is fed in).
+func FileChecksum(data []byte, digest string, version int, seed int32) []byte {
+	var seedBuf [4]byte
+	if seed != 0 {
+		binary.LittleEndian.PutUint32(seedBuf[:], uint32(seed))
+	}
+
+	switch digest {
+	case "md4":
+		h := md4.New()
+		if version < 30 && seed != 0 {
+			h.Write(seedBuf[:])
+		}
+		h.Write(data)
+		return h.Sum(nil)
+	case "md5":
+		h := md5.New()
+		h.Write(data)
+		return h.Sum(nil)
+	default:
+		// unsupported digest -- return nil
+		return nil
+	}
 }
 
 // SupportedDigests returns the list of checksum algorithms this library supports,
