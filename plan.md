@@ -311,7 +311,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 **Goal:** Implement the server-side file list walker and file data sender: walk backing FS to emit file list in rsync wire format, compute block checksums, and answer delta requests.
 
-**Files:** `server-send.go` (transfer phase: `doServerSender`, `walk`, `sendFileList`, `sendFiles`, `sendFile`, `receiveSums`, `hashSearch`, `matchSums`, `sendStats`, `readFinalGoodbye`); the wire-level round-trip test lives in `server-handshake_test.go` (proto 27) and the real-client coverage in `integration_test.go`.
+**Files:** `server-send.go` (transfer phase: `doServerSender`, `walk`, `sendFileList`, `sendFiles`, `sendFile`, `receiveSums`, `hashSearch`, `matchSums`, `sendStats`, `readFinalGoodbye`); the wire-level round-trip test lives in `server-handshake_test.go` (proto 27) and the real-client coverage in `integration-server_test.go`.
 
 **API:** Internal helpers composed within HandleConnection.
 
@@ -422,7 +422,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 **Goal:** Tests that connect our library to the real `rsync` binary.  Skipped with `-short` or when `rsync` is not found.  Prefer `.upstream/rsync` if it exists, then any `rsync` on `PATH`.
 
-**Files:** `integration_test.go`, `protocol/args.go` (ExtractPreserveFlags), `server-handshake.go` (preserve flags propagation)
+**Files:** `integration-{client,server}_test.go`, `protocol/args.go` (ExtractPreserveFlags), `server-handshake.go` (preserve flags propagation)
 
 **Tests (client-side):**
 
@@ -440,7 +440,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 **Goal:** Integration tests that connect our library against each binary in `.upstream/old_versions/` (rsync 2.6.0 through 3.4.1, covering protocol versions 27, 30, 31, 32).  Skipped with `-short` or when specific binaries are missing.
 
-**Files:** `integration_test.go` (extended)
+**Files:** `integration-{client,server}_test.go` (extended)
 
 **Tests (client-side):**
 
