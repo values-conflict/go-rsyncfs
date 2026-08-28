@@ -178,7 +178,11 @@ Major change: the multiplexed I/O layer was introduced, allowing MSG_DATA frames
 
 Source: `.upstream/main.c:1293`, `io_start_multiplex_out(f_out);` (`if (protocol_version >= 23) io_start_multiplex_out(f_out)`), `.upstream/main.c:1399`, `io_start_multiplex_in(f_in);` (`if (protocol_version >= 23) io_start_multiplex_in(f_in)`).
 
-Before protocol 23, all I/O was buffered (raw bytes).  From protocol 23 onward the daemon's output is multiplexed (`io_start_multiplex_out(f_out)` in `start_server()`, gated on `protocol_version >= 23`), while the client's output stays buffered/raw until protocol 30 (`io_start_multiplex_out(f_out)` in `client_run()`, gated on `protocol_version >= 30`).  The client's input is multiplexed from protocol 23 (`io_start_multiplex_in(f_in)` in `client_run()`), and the daemon's input only becomes multiplexed at protocol 30/31 (`need_messages_from_generator`).  So proto 23-29 are asymmetric: only the daemon→client direction is framed; proto ≥ 30 is bidirectional.
+From protocol 23 onward the daemon's output is multiplexed (`io_start_multiplex_out(f_out)` in `start_server()`, gated on `protocol_version >= 23`), while the client's output stays buffered/raw until protocol 30 (`io_start_multiplex_out(f_out)` in `client_run()`, gated on `protocol_version >= 30`).  The client's input is multiplexed from protocol 23 (`io_start_multiplex_in(f_in)` in `client_run()`), and the daemon's input only becomes multiplexed at protocol 30 (`need_messages_from_generator`).  So proto 23-29 are asymmetric: only the daemon→client direction is framed; proto ≥ 30 is bidirectional.
+
+Proto 20-22 are not all-raw either.  In pull mode the daemon is the sender (the client's `--sender` argument sets `am_sender`), so `rsync_module()` multiplexes the daemon's output for every proto < 23 (`if (protocol_version < 23 && (protocol_version == 22 || am_sender)) io_start_multiplex_out(f_out);`, `.upstream/clientserver.c:1226-1227`), and the client multiplexes its input at the end of `start_inband_exchange()` for every proto < 23 (`if (protocol_version < 23) { if (protocol_version == 22 || !am_sender) io_start_multiplex_in(f_in); }`, `.upstream/clientserver.c:456-459`; on the client in pull mode `am_sender` is 0, so the `!am_sender` branch always applies).  The consequences:
+- The checksum seed (the last handshake item, from `setup_protocol()`) travels inside an MSG_DATA frame for proto 20-22, because both sides' multiplexing is already on when it is sent.  For proto 23-29 the daemon's mux switch happens in `start_server()` after `setup_protocol()`, so the seed is plain bytes there, and the same is true for proto ≥ 30 (the switch happens there too, after the seed).
+- The client's output and the daemon's input stay raw for every proto < 30, so the filter list and the selectors are unframed below proto 30.
 
 #### Protocol 24 -- final goodbye message
 
@@ -229,7 +233,7 @@ Key changes:
 - **Compressed NDX:** `write_ndx()`/`read_ndx()` use delta-encoded single-byte format instead of 4-byte LE int.  NDX_DONE is 1 byte `0x00`.  Source: `.upstream/io.c:2503-2547`, `void write_ndx(int f, int32 ndx) ... }`, `.upstream/io.c:2550-2592`, `int32 read_ndx(int f) ... }`.  A peer-supplied index that overflows a signed int32 is rejected (`MAX_INT32` gate, `.upstream/io.c:2582-2586`, `if (unum > (uint32)MAX_INT32) { ... }`).
 - **Varint xmit flags:** When `CF_VARINT_FLIST_FLAGS` is set (via `v` in client_info), xmit flags use varint encoding instead of byte/shortint.  Source: `.upstream/flist.c:644`, `if (xfer_flags_as_varint)`.
 - **Compat flags exchange:** Server sends compat flags as varint; client reads and sets features accordingly.  Source: `.upstream/compat.c:722-788`, `} else if (protocol_version >= 30) { ... need_messages_from_generator = 1;`.
-- **`need_messages_from_generator` is always 1** for proto ≥ 30.  Source: `.upstream/compat.c:788`, `need_messages_from_generator = 1;` (`need_messages_from_generator = 1`), set unconditionally inside the `} else if (protocol_version >= 30) {` block.  This is set for ALL processes (not just senders).  For the daemon sender, this causes `start_server()` to set multiplexed input initially (for the filter list phase), but `do_server_sender()` switches to buffered input before reading selectors.
+- **`need_messages_from_generator` is always 1** for proto ≥ 30.  Source: `.upstream/compat.c:788`, `need_messages_from_generator = 1;` (`need_messages_from_generator = 1`), set unconditionally inside the `} else if (protocol_version >= 30) {` block.  This is set for ALL processes (not just senders).  For the daemon sender, `start_server()` sets multiplexed input before `recv_filter_list()`, and it stays on for the whole transfer: `do_server_sender()` calls `io_start_buffering_in(f_in)` (`.upstream/main.c:991`) before the selector loop, but that only allocates the I/O buffer -- it does not clear the multiplex flag -- so selectors are read through the same multiplexed input as the filter list.
 - **Null-terminated args:** `rl_nulls = 1` for proto ≥ 30.  Source: `.upstream/clientserver.c:258`, `rl_nulls = 1;`.
 - **MD5 checksums:** Default checksum algorithm is MD5 instead of MD4.  Source: `.upstream/compat.c:415`, `env_str = ntype == NSTR_COMPRESS ? "zlib" : protocol_version >= 30 ? "md5" : ...` (`protocol_version >= 30 ? "md5" : "md4"`).
 - **Subprotocol version:** Greeting includes subprotocol version number.  Source: `.upstream/compat.c:844`, `void output_daemon_greeting(int f_out, int am_client)` (`io_printf(f_out, "@RSYNCD: %d.%d %s\n", ...)`).
@@ -450,15 +454,15 @@ Source: `.upstream/main.c:1292-1313`, `if (protocol_version >= 23) ... io_start_
 
 | Direction | Mode | Proto gate | Source |
 |-----------|------|------------|--------|
-| Output (`f_out` → client socket) | **multiplexed** (MSG_DATA frames) | proto ≥ 23 | `.upstream/main.c:1293`, `io_start_multiplex_out(f_out);` (`io_start_multiplex_out(f_out)`) |
-| Input (`f_in` ← client socket) | **multiplexed** if `need_messages_from_generator`, else **buffered** (initially); switched to **buffered** for selector reading | see below | `.upstream/main.c:1310-1313` |, `if (need_messages_from_generator) ... io_start_buffering_in(f_in);`
+| Output (`f_out` → client socket) | **multiplexed** (MSG_DATA frames) | proto ≥ 23 (earlier, in `rsync_module()`, for proto < 23) | `.upstream/main.c:1293`, `io_start_multiplex_out(f_out);` (`io_start_multiplex_out(f_out)`), `.upstream/clientserver.c:1226-1227` |
+| Input (`f_in` ← client socket) | **multiplexed** if `need_messages_from_generator`, else **buffered** (raw bytes); `io_start_buffering_in()` in `do_server_sender()` only allocates the buffer and leaves the mode unchanged | proto ≥ 30 (or `remove_source_files`) | `.upstream/main.c:1310-1313` |, `if (need_messages_from_generator) ... io_start_buffering_in(f_in);`
 
 `need_messages_from_generator` is set when:
 
 - `protocol_version >= 30` (`.upstream/compat.c:788`, `need_messages_from_generator = 1;`) -- set unconditionally inside the `} else if (protocol_version >= 30) {` block in `setup_protocol()`.  This is set for ALL processes (both client and server, sender and receiver), not just senders.  The `if (am_sender)` guard is in `start_server()` (`.upstream/main.c:1297`, `if (am_sender) {`), which only checks the flag for the sender path.
 - `remove_source_files` (`--remove-source-files`) is set (`.upstream/options.c:2360`, `if (remove_source_files) {`).
 
-For a standard pull (`rsync -av host::mod/ ./`) with proto ≥ 30, `need_messages_from_generator` is 1 (set by compat.c:788), so the daemon sets multiplexed input initially (for the filter list phase).  However, `do_server_sender()` switches to buffered input before reading selectors (`.upstream/main.c:991`, `io_start_buffering_in(f_in);`).  For proto < 30, `need_messages_from_generator` remains 0 and daemon input is buffered throughout.
+For a standard pull (`rsync -av host::mod/ ./`) with proto ≥ 30, `need_messages_from_generator` is 1 (set by compat.c:788), so the daemon reads the filter list and every selector through multiplexed input.  `do_server_sender()` calls `io_start_buffering_in(f_in)` before the selector loop (`.upstream/main.c:991`), but that only allocates the I/O buffer -- it does not clear `in_multiplexed` -- so the framing stays on.  For proto < 30, `need_messages_from_generator` remains 0 and daemon input is buffered (raw bytes) throughout, including selector reading.
 
 #### Server recv path (`do_server_recv()`)
 
@@ -478,13 +482,13 @@ Source: `.upstream/main.c:1200-1205`, `} ... io_start_buffering_in(f_in);`.
 | Field | Value |
 |-------|-------|
 | Transport | Daemon socket |
-| Output mode (generator) | Buffered (raw bytes) |
-| Input mode (daemon) | Buffered (raw bytes) -- switched by `io_start_buffering_in(f_in)` in `do_server_sender()` |
-| Wire format | Raw bytes from generator -- `write_ndx()` produces compressed NDX, `write_shortint()` produces 2-byte LE.  Daemon reads raw bytes. |
-| Proto gate | All versions |
+| Output mode (generator) | Buffered (raw bytes) for proto < 30; **multiplexed** (MSG_DATA frames) for proto ≥ 30 |
+| Input mode (daemon) | Buffered (raw bytes) for proto < 30; **multiplexed** for proto ≥ 30 |
+| Wire format | Generator-side `write_ndx()` produces compressed NDX, `write_shortint()` 2-byte LE; the bytes are raw for proto < 30 and wrapped in MSG_DATA frames for proto ≥ 30 |
+| Proto gate | All versions (framing gate: proto ≥ 30) |
 | Data | Selectors (NDX + iflags + optional attrs), NDX_DONE |
 
-**Source:** Generator output: `.upstream/main.c:1138`, `io_start_buffering_out(f_out);`.  Daemon input: `.upstream/main.c:991`, `io_start_buffering_in(f_in);` (`io_start_buffering_in(f_in)` in `do_server_sender()`).  The daemon initially sets multiplexed input for proto ≥ 30 (`.upstream/main.c:1311`, `io_start_multiplex_in(f_in);`), but `do_server_sender()` switches to buffered input before reading selectors (`.upstream/main.c:991`, `io_start_buffering_in(f_in);`).  The filter list is read via multiplexed input (proto ≥ 30) before this switch.
+**Source:** Generator output: `io_start_multiplex_out(f_out)` at `.upstream/main.c:1357` (proto ≥ 30, before the fork; the generator inherits it), `io_start_buffering_out(f_out)` at `.upstream/main.c:1138` (after the fork, every version -- buffer allocation only, does not clear the multiplex flag).  Daemon input: `io_start_multiplex_in(f_in)` at `.upstream/main.c:1311` (proto ≥ 30), `io_start_buffering_in(f_in)` at `.upstream/main.c:1313` (proto < 30) and `.upstream/main.c:991` (`do_server_sender()`, buffer allocation only).  The filter list is read in the same mode as the selectors.
 
 ### 4.2 Channel 2: Daemon → Receiver (file data, echoed selectors)
 
@@ -553,6 +557,7 @@ Trace for `rsync -av host::mod/ ./` (pull, proto 32).  Focus on the daemon socke
 - Digest list: space-separated, client preference wins.
 - Subprotocol value is always included in the greeting format string (`.upstream/compat.c:853`, `io_printf(f_out, "@RSYNCD: %d.%d %s\n", protocol_version, our_sub, tmpbuf);`, format `@RSYNCD: %d.%d %s\n`).  If the server's `sscanf` parse yields `remote_sub < 0` (parse failure), it is a fatal error for proto >= 30 (`.upstream/clientserver.c:217-226`, `if (remote_sub < 0) { ... }`) and defaults to 0 for proto < 30.
 - Digest list is always sent by modern rsync (`.upstream/compat.c:851-853` calls `get_default_nno_list()`).  For proto > 31 (proto 32+), omitting it, `get_default_nno_list(&valid_auth_checksums, tmpbuf, MAX_NSTR_STRLEN, '\0'); ... io_printf(f_out, "@RSYNCD: %d.%d %s\n", protocol_version, our_sub, tmpbuf);` is a fatal error (`.upstream/clientserver.c:234-240`, `} else if (remote_protocol > 31) { ... }`).  For proto 30-31, the receiver assumes `md5`; for proto < 30, it assumes `md4` (`.upstream/compat.c:555-556`, `else ... len = strlcpy(tmpbuf, protocol_version >= 30 ? "md5" : "md4", MAX_NSTR_STRLEN);`).
+- **MOTD:** when the daemon's `motd file` option is set, the daemon sends the file's content immediately after its greeting (`.upstream/clientserver.c:182-196`, `if (motd && *motd) { ... while (f && !feof(f)) { ... write_buf(f_out, buf, len); } ... write_sbuf(f_out, "\n"); }`).  Note the trailing `write_sbuf(f_out, "\n")` runs even when the file cannot be opened, so an unreadable motd file still produces a bare `\n` line after the greeting.  The client reads such lines in the module-response loop and drops them (see step 2).
 
 ### Step 2: Module selection (text)
 
@@ -566,6 +571,10 @@ mod/\n
 **Process:** Client (pre-fork) → Daemon
 
 **Source:** `.upstream/clientserver.c:395`, `io_printf(f_out, "%.*s\n", modlen, modname);` (`io_printf(f_out, "%.*s\n", modlen, modname)` in `start_inband_exchange()`, `.upstream/clientserver.c:263-464`, `int start_inband_exchange(int f_in, int f_out, const char *user, int argc, ch... ... }`).
+
+**Details:**
+- The module line is the module name only (no trailing slash): `io_printf` uses `modlen`, which excludes the `\0`-terminated `modname`'s appended `/`.
+- The client then loops on the daemon's response lines (`.upstream/clientserver.c:403-441`, `while (1) { if (!read_line_old(f_in, line, sizeof line, 0)) { ... } ... }`): `@RSYNCD: AUTHREQD ` → auth response, `@RSYNCD: OK` → done, `@RSYNCD: EXIT` → client exits (module-listing termination), `@ERROR...` → fatal, anything else (an MOTD line or a module-listing line) is printed at `-v` and **skipped**, and the loop reads the next line.
 
 ### Step 3: Authentication (text, optional)
 
@@ -689,6 +698,7 @@ Server → Client: 0x9F 0x3A 0x01 0x00  (checksum_seed as int32 LE, example valu
 - Server generates seed as `time(NULL) ^ (getpid() << 6)` if not already set.
 - Sent as `write_int(f_out, checksum_seed)` (4 bytes LE).
 - Client reads as `read_int(f_in)`.
+- **Framing:** plain bytes for proto 23 and up (both the daemon's output mux switch in `start_server()` and the client's input mux switch in `client_run()` happen after `setup_protocol()`), but wrapped in an MSG_DATA frame for proto 20-22 (both sides' multiplexing is already on at that point -- `rsync_module()` muxes the daemon's output and `start_inband_exchange()` muxes the client's input before `setup_protocol()` runs).
 
 ### Step 8: I/O mode transition (internal, no wire data)
 
@@ -703,7 +713,7 @@ Server → Client: 0x9F 0x3A 0x01 0x00  (checksum_seed as int32 LE, example valu
 - Client sender: `io_start_multiplex_in(f_in)` at `.upstream/main.c:1361`, `io_start_multiplex_in(f_in);` (proto ≥ 31 or proto ≥ 23 without filesfrom_host, gate at `.upstream/main.c:1360`, `if (protocol_version >= 31 || (!filesfrom_host && protocol_version >= 23))`).
 - Client receiver (pre-fork): `io_start_multiplex_in(f_in)` at `.upstream/main.c:1399`, `io_start_multiplex_in(f_in);` (proto ≥ 23).
 
-**After this point, the daemon→client channel (Channel 2) flows through the multiplexed I/O layer.**  The generator→daemon channel (Channel 1) uses buffered I/O for selector reading: the generator writes selectors as raw bytes (buffered output), and the daemon reads them as raw bytes (buffered input, switched by `io_start_buffering_in(f_in)` in `do_server_sender()` at `.upstream/main.c:991`, `io_start_buffering_in(f_in);`).
+**After this point, the daemon→client channel (Channel 2) flows through the multiplexed I/O layer.**  The generator→daemon channel (Channel 1) is raw for proto < 30 and MSG_DATA-framed for proto ≥ 30: the generator's output was set multiplexed before the fork (`.upstream/main.c:1357`) and the post-fork `io_start_buffering_out(f_out)` (`.upstream/main.c:1138`) only allocates the buffer, so the framing the generator inherited stays on; the daemon reads through the matching mode (`io_start_multiplex_in` at `.upstream/main.c:1311` for proto ≥ 30, `io_start_buffering_in` at `.upstream/main.c:1313`/`.991` otherwise -- the latter also only allocates the buffer).
 
 ### Step 9: Filter list transfer (binary)
 
@@ -782,10 +792,10 @@ The `NDX_DONE` marker is NOT part of the file list; it is sent separately by the
 **Phase exchange for proto ≥ 29 (max_phase = 2):**
 
 The generator communicates on two channels simultaneously:
-- **Daemon socket** (`f_out` / `sock_f_out`): writes selectors and NDX_DONE to the daemon (buffered output, raw bytes)
+- **Daemon socket** (`f_out` / `sock_f_out`): writes selectors and NDX_DONE to the daemon (raw bytes for proto < 30, MSG_DATA-framed for proto ≥ 30)
 - **Internal pipe** (`f_in` / `iobuf.in_fd`): reads completion messages from the receiver (multiplexed input, MSG_DATA frames)
 
-The daemon reads selectors from the generator on the daemon socket (buffered input) and writes echoed selectors and file data to the receiver on the same socket (multiplexed output).
+The daemon reads selectors from the generator on the daemon socket (raw bytes for proto < 30, multiplexed input for proto ≥ 30) and writes echoed selectors and file data to the receiver on the same socket (multiplexed output).
 
 **Main transfer phase (phase 0 → 1):**
 1. Generator sends all selectors to daemon via `recv_generator()` (called per-file at `.upstream/generator.c:2818`, `recv_generator(fbuf, file, ndx, itemizing, code, f_out);`).
@@ -810,13 +820,13 @@ The daemon reads selectors from the generator on the daemon socket (buffered inp
 3. The daemon then writes one trailing `write_int(f_out, -1)` after the loop (v2.6.0 `sender.c`, end of `send_files()`), followed by the stats (step 16).
 4. The receiver (v2.6.0 `recv_files()`) treats the first `-1` as the phase-0 marker (it writes `write_int(f_gen, -1)` to the generator pipe so the generator can finish its redo list) and the trailing `-1` as the end of the stream.  The generator sends the second `-1` only after it has drained that redo list; the final int32 `-1` goodbye (step 17) is sent after the receiver signals completion.
 
-**Critical distinction:** Generator uses `write_ndx(f_out, NDX_DONE)` which produces 1 byte `0x00` on the daemon socket (compressed NDX, buffered output).  Receiver uses `write_int(f_out, NDX_DONE)` which produces 4 bytes `0xFFFFFFFF` on the internal pipe (fixed-width int, multiplexed output).
+**Critical distinction:** Generator uses `write_ndx(f_out, NDX_DONE)` which produces 1 byte `0x00` on the daemon socket (compressed NDX, raw for proto < 30 / MSG_DATA-framed for proto ≥ 30).  Receiver uses `write_int(f_out, NDX_DONE)` which produces 4 bytes `0xFFFFFFFF` on the internal pipe (fixed-width int, multiplexed output).
 
 ### Step 12: Selector loop (binary)
 
 **Direction:** Generator → Daemon (selectors), Daemon → Receiver (data)
 
-**Wire format (generator → daemon, buffered):**
+**Wire format (generator → daemon; raw for proto < 30, MSG_DATA-framed for proto ≥ 30):**
 ```
 ndx       : compressed NDX (proto ≥ 30) or int32 LE (older)
 iflags    : uint16 LE (proto ≥ 29)
@@ -833,13 +843,13 @@ MSG_DATA: [delta fill data: raw bytes for mismatched regions]
 MSG_SUCCESS: [ndx as int32 LE]
 ```
 
-**Process:** Generator → Daemon (Channel 1, buffered), Daemon → Receiver (Channel 2, multiplexed)
+**Process:** Generator → Daemon (Channel 1, raw for proto < 30 / multiplexed for proto ≥ 30), Daemon → Receiver (Channel 2, multiplexed)
 
 **Source:** `.upstream/generator.c:588-597`, `if ((iflags & (SIGNIFICANT_ITEM_FLAGS|ITEM_REPORT_XATTR) || INFO_GTE(NAME, 2) ... write_vstring(sock_f_out, xname, strlen(xname));` (generator sends selectors via `sock_f_out` in `itemize()`; the transfer ndx is written at `.upstream/generator.c:2376`, `write_ndx(f_out, ndx);`), `.upstream/sender.c:520`, `ndx = read_ndx_and_attrs(f_in, f_out, &iflags, &fnamecmp_type,` (daemon reads selectors via `read_ndx_and_attrs`), `.upstream/sender.c:766-781`, `write_ndx_and_attrs(f_out, ndx, iflags, fname, file, fnamecmp_type, xname, xl... ... end_progress(st.st_size);` (sends sum_head + delta data).
 
 **Details:**
-- Generator sends selectors via `recv_generator()` (`.upstream/generator.c:1608-2457`, `static void recv_generator(char *fname, struct file_struct *file, int ndx, ... }`), which writes the ndx via `write_ndx(f_out, ndx)` (`.upstream/generator.c:2376`, `write_ndx(f_out, ndx);`) and calls `itemize()` (`.upstream/generator.c:517-612`, `void itemize(const char *fnamecmp, struct file_struct *file, int ndx, int sta... ... }`), which writes `write_shortint(sock_f_out, iflags)` for proto ≥ 29 (`.upstream/generator.c:588-597`, `if ((iflags & (SIGNIFICANT_ITEM_FLAGS|ITEM_REPORT_XATTR) || INFO_GTE(NAME, 2) ... write_vstring(sock_f_out, xname, strlen(xname));`).  Output is buffered (raw bytes).
-- Daemon reads selectors via `read_ndx_and_attrs(f_in, f_out, ...)` (`.upstream/rsync.c:323-434`, `int read_ndx_and_attrs(int f_in, int f_out, int *iflag_ptr, uchar *type_ptr, ... ... *len_ptr = len;`), which uses buffered input (raw bytes) -- switched by `io_start_buffering_in(f_in)` in `do_server_sender()` (`.upstream/main.c:991`, `io_start_buffering_in(f_in);`).  This applies to all protocol versions.
+- Generator sends selectors via `recv_generator()` (`.upstream/generator.c:1608-2457`, `static void recv_generator(char *fname, struct file_struct *file, int ndx, ... }`), which writes the ndx via `write_ndx(f_out, ndx)` (`.upstream/generator.c:2376`, `write_ndx(f_out, ndx);`) and calls `itemize()` (`.upstream/generator.c:517-612`, `void itemize(const char *fnamecmp, struct file_struct *file, int ndx, int sta... ... }`), which writes `write_shortint(sock_f_out, iflags)` for proto ≥ 29 (`.upstream/generator.c:588-597`, `if ((iflags & (SIGNIFICANT_ITEM_FLAGS|ITEM_REPORT_XATTR) || INFO_GTE(NAME, 2) ... write_vstring(sock_f_out, xname, strlen(xname));`).  Output is raw bytes for proto < 30 and MSG_DATA-framed for proto ≥ 30.
+- Daemon reads selectors via `read_ndx_and_attrs(f_in, f_out, ...)` (`.upstream/rsync.c:323-434`, `int read_ndx_and_attrs(int f_in, int f_out, int *iflag_ptr, uchar *type_ptr, ... ... *len_ptr = len;`), which reads raw bytes for proto < 30 and unwraps MSG_DATA frames for proto ≥ 30 (`io_start_buffering_in(f_in)` in `do_server_sender()` at `.upstream/main.c:991` only allocates the buffer; the multiplex flag set in `start_server()` at `.upstream/main.c:1311` for proto ≥ 30 stays on).
 - Daemon echoes each selector to the client via `write_ndx_and_attrs(f_out, ...)` (`.upstream/sender.c:468-483`, `static void write_ndx_and_attrs(int f_out, int ndx, int iflags, ... send_xattr_request(fname, file, f_out);`), which uses multiplexed output (MSG_DATA frames).
 - Receiver reads echoed selectors via **multiplexed input** (transparently unwraps MSG_DATA).
 - For TRANSFER selectors, daemon sends sum_head + block checksums + delta fill data (`.upstream/sender.c:766-781`; `write_sum_head()` at `.upstream/sender.c:767`, `write_sum_head(f_xfer, s);`; `match_sums()` at `.upstream/send, `write_ndx_and_attrs(f_out, ndx, iflags, fname, file, fnamecmp_type, xname, xl... ... end_progress(st.st_size);`er.c:779`, `match_sums(f_xfer, s, mbuf, st.st_size);`).
@@ -1153,9 +1163,9 @@ The compressed NDX encoding is the same in both cases; only the framing differs.
 |-----------|----------|----------|----------|----------|
 | Output → Client | multiplexed | multiplexed | multiplexed | multiplexed |
 | Input ← Client (initial) | buffered | multiplexed* | multiplexed* | multiplexed* |
-| Input ← Client (selectors) | buffered | buffered | buffered | buffered |
+| Input ← Client (selectors) | buffered | multiplexed* | multiplexed* | multiplexed* |
 
-\* For `am_sender`: initial input is buffered for proto < 30, multiplexed for proto ≥ 30 (because `need_messages_from_generator` is set unconditionally at `.upstream/compat.c:788`, `need_messages_from_generator = 1;`).  However, `do_server_sender()` calls `io_start_buffering_in(f_in)` (`.upstream/main.c:991`, `io_start_buffering_in(f_in);`) which switches to buffered input before reading selectors.  So selector reading always uses buffered input.  The multiplexed input is only used for the filter list phase.
+\* For `am_sender`: input is buffered for proto < 30 and multiplexed for proto ≥ 30 (because `need_messages_from_generator` is set unconditionally at `.upstream/compat.c:788`, `need_messages_from_generator = 1;`).  `do_server_sender()` calls `io_start_buffering_in(f_in)` (`.upstream/main.c:991`) before the selector loop, but that only allocates the I/O buffer -- it does not clear the multiplex flag -- so the filter list and the selectors are read in the same mode.
 
 For `am_receiver` (push), `do_server_recv()` sets its own I/O mode separately (see table below).
 
@@ -1500,15 +1510,15 @@ Same semantic meaning (NDX_DONE = -1), but different wire format and different c
 - **Generator** (`generate_files()`, `.upstream/generator.c:2861`, `write_ndx(f_out, NDX_DONE);`): `write_ndx(f_out, NDX_DONE)` → compressed NDX → 1 byte `0x00` on the daemon socket (buffered output, raw bytes).  Here `f_out` is the daemon socket fd.
 - **Receiver** (`recv_files()`, `.upstream/receiver.c:860`, `write_int(f_out, NDX_DONE);`): `write_int(f_out, NDX_DONE)` → 4-byte LE int32 → 4 bytes `0xFF 0xFF 0xFF 0xFF` on the internal pipe (multiplexed output, inside MSG_DATA frame).
 
-The generator talks to the daemon (Channel 1, buffered) and the receiver talks to the generator (Channel 3, multiplexed).  The receiver always uses `write_int()` because the generator's `wait_for_receiver()` (`.upstream/io.c:1920`, `void wait_for_receiver(void)`) reads via `read_int(iobuf.in_fd)` (`.upstream/io.c:1926`, `int ndx = read_int(iobuf.in_fd);`).
+The generator talks to the daemon (Channel 1, raw for proto < 30 / multiplexed for proto ≥ 30) and the receiver talks to the generator (Channel 3, multiplexed).  The receiver always uses `write_int()` because the generator's `wait_for_receiver()` (`.upstream/io.c:1920`, `void wait_for_receiver(void)`) reads via `read_int(iobuf.in_fd)` (`.upstream/io.c:1926`, `int ndx = read_int(iobuf.in_fd);`).
 
 ### 14.2 `read_ndx_and_attrs()` reads from one fd and echoes to another
 
 The echo may use a different I/O mode than the read.  Source: `.upstream/rsync.c:323-434`, `int read_ndx_and_attrs(int f_in, int f_out, int *iflag_ptr, uchar *type_ptr, ... ... *len_ptr = len;`.
 
-`read_ndx_and_attrs(f_in, f_out, ...)` reads a selector from `f_in` and the caller (eg, `write_ndx_and_attrs()` in `.upstream/sender.c:468-483`, `static void write_ndx_and_attrs(int f_out, int ndx, int iflags, ... send_xattr_request(fname, file, f_out);`) echoes it to `f_out`.  If `f_in` is buffered and `f_out` is multiplexed, the selector arrives as raw bytes but is echoed as MSG_DATA frames.
+`read_ndx_and_attrs(f_in, f_out, ...)` reads a selector from `f_in` and the caller (eg, `write_ndx_and_attrs()` in `.upstream/sender.c:468-483`, `static void write_ndx_and_attrs(int f_out, int ndx, int iflags, ... send_xattr_request(fname, file, f_out);`) echoes it to `f_out`.  For proto ≥ 30 both directions are multiplexed, so the selector arrives and is echoed as MSG_DATA frames with identical payloads; for proto < 30 the selector arrives as raw bytes but is echoed as MSG_DATA frames.
 
-**Example:** Daemon reads selector from generator (Channel 1, buffered/raw) and echoes to client receiver (Channel 2, multiplexed/MSG_DATA).  The selector bytes are the same, but the wire framing differs.
+**Example:** Daemon reads a selector from the generator (Channel 1, raw for proto < 30, multiplexed for proto ≥ 30) and echoes it to the client receiver (Channel 2, multiplexed/MSG_DATA).  The selector bytes are the same either way; only the wire framing of Channel 1 depends on the protocol version.
 
 ### 14.3 Mux frame headers are transparent to application code but visible on the wire
 
@@ -1529,11 +1539,11 @@ After the fork:
 
 The generator sends selectors to `sock_f_out` (daemon socket) via `write_ndx(sock_f_out, ndx)` in `itemize()` (`.upstream/generator.c:591-592`, `if (ndx >= 0) ... write_ndx(sock_f_out, ndx);`).  In `generate_files(f_out, local_name)`, the `f_out` parameter is the daemon socket fd (NOT the internal pipe).  The generator writes NDX_DONE via `write_ndx(f_out, NDX_DONE)` (`.upstream/generator.c:2861`, `write_ndx(f_out, NDX_DONE);`) and selector ndx via `write_ndx(f_out, ndx)` (`.upstream/generator.c:2376`, `write_ndx(f_out, ndx);`), and reads status messages, NDX_DONE, and file list data (inc_recurse) from the receiver via `wait_for_receiver()` which reads from `iobuf.in_fd` (the internal pipe).
 
-### 14.5 `io_start_buffering_out(f_out)` in generator overrides earlier mux setup
+### 14.5 `io_start_buffering_out(f_out)` in the generator does NOT clear the mux setup
 
-The generator's output to the daemon socket is buffered, even though `client_run()` may have set it to multiplexed before the fork.  Source: `.upstream/main.c:1357`, `io_start_multiplex_out(f_out);` (client_run sets `io_start_multiplex_out(f_out)` for proto ≥ 30), `.upstream/main.c:1138`, `io_start_buffering_out(f_out);` (generator overrides with `io_start_buffering_out(f_out)`).
+`io_start_buffering_out()` (`.upstream/io.c:1527-1545`, `BOOL io_start_buffering_out(int f_out) ... }`) only allocates the I/O buffer (`alloc_xbuf(&iobuf.out, ...)`); it never touches `iobuf.out_empty_len` (the multiplex marker).  The same is true of `io_start_buffering_in()` (`.upstream/io.c:1547-1565`).  Only `io_start_multiplex_in/out()` and `io_end_multiplex_in/out()` change the mode.
 
-Before the fork, `client_run()` sets up multiplexed output on the daemon socket.  After the fork, the generator calls `io_start_buffering_out(f_out)` which resets the output mode to buffered.  This is intentional -- the generator sends selectors as raw bytes, not mux-wrapped.
+Consequence: before the fork, `client_run()` sets up multiplexed output on the daemon socket for proto ≥ 30 (`.upstream/main.c:1357`), and after the fork the generator's `io_start_buffering_out(f_out)` (`.upstream/main.c:1138`) leaves that multiplexing in place.  The generator sends selectors and NDX_DONE mux-wrapped for proto ≥ 30 (raw bytes for proto < 30, where the output was never multiplexed), and the daemon reads them in the matching mode.
 
 ### 14.6 `write_ndx_and_attrs()` in sender.c echoes selectors
 
@@ -1556,13 +1566,13 @@ The daemon sender also uses `write_ndx()` for the phase exchange (`.upstream/sen
 - Daemon sender: `handle_stats(f_out)` -- writes stats to client socket (`.upstream/main.c:353-359`, `write_varlong30(f, total_read, 3); ... }`).
 - Daemon receiver: `handle_stats(f_out)` -- returns early (`.upstream/main.c:347-349` && `!am_sender`)., `if (f == -1 || !am_sender) ... }`
 
-### 14.9 `need_messages_from_generator` is set unconditionally for proto ≥ 30, but daemon switches to buffered for selectors
+### 14.9 `need_messages_from_generator` is set unconditionally for proto ≥ 30, and the daemon's input stays multiplexed
 
 For proto ≥ 30, `need_messages_from_generator` is always 1 (set at `.upstream/compat.c:788`, `need_messages_from_generator = 1;` inside the `} else if (protocol_version >= 30) {` block).  This is set for ALL processes (both client and server, sender and receiver), not just senders.  The `if (am_sender)` guard is in `start_server()` (`.upstream/main.c:1297`, `if (am_sender) {`), which only checks the flag for the sender path.  This is NOT just for `inc_recurse` -- it is set unconditionally for all proto ≥ 30 connections.
 
-In `start_server()`, this causes the daemon to set multiplexed input (`.upstream/main.c:1311`, `io_start_multiplex_in(f_in);`).  However, `do_server_sender()` calls `io_start_buffering_in(f_in)` (`.upstream/main.c:991`, `io_start_buffering_in(f_in);`) which switches to buffered input **before** `send_files()` reads selectors.  So the actual selector reading uses buffered input, matching the generator's buffered output.
+In `start_server()`, this causes the daemon to set multiplexed input (`.upstream/main.c:1311`, `io_start_multiplex_in(f_in);`).  `do_server_sender()` calls `io_start_buffering_in(f_in)` (`.upstream/main.c:991`) before `send_files()` reads selectors, but that only allocates the I/O buffer (`.upstream/io.c:1547-1565`); it does not clear the multiplex flag.  So the actual selector reading uses multiplexed input, matching the generator's multiplexed output.
 
-The multiplexed input is only used for the filter list phase (read by `recv_filter_list()` in `start_server()` before `do_server_sender()` is called).  After the switch to buffered input, all selector reading and the final goodbye use buffered input.
+The filter list, all selectors, the stats, and the final goodbye are all read through the same multiplexed input for proto ≥ 30.  For proto < 30, `need_messages_from_generator` is 0 (unless `--remove-source-files`) and the daemon's input is buffered (raw bytes) throughout.
 
 ### 14.10 Daemon socket protocol (text greeting) vs SSH/rsh protocol (binary version exchange)
 
@@ -1572,15 +1582,15 @@ The `remote_protocol == 0` gate (`.upstream/compat.c:602`, `if (remote_protocol 
 
 ## 15. Quick Reference & Common Pitfalls
 
-1. **When the real rsync client (proto 32) connects to our server via daemon socket, what I/O mode does the generator use to send selectors?** Buffered (raw bytes).  Source: `.upstream/main.c:1138`, `io_start_buffering_out(f_out);` (`io_start_buffering_out(f_out)`).  The generator calls `write_ndx(sock_f_out, ndx)` in `itemize()` (`.upstream/generator.c:591-592`, `if (ndx >= 0) ... write_ndx(sock_f_out, ndx);`) which writes compressed NDX as raw bytes.
+1. **When the real rsync client (proto 32) connects to our server via daemon socket, what I/O mode does the generator use to send selectors?** Multiplexed (MSG_DATA frames).  Source: `client_run()` sets `io_start_multiplex_out(f_out)` for proto ≥ 30 before the fork (`.upstream/main.c:1357`), and the generator's post-fork `io_start_buffering_out(f_out)` (`.upstream/main.c:1138`) only allocates the buffer without clearing the multiplex flag (`.upstream/io.c:1527-1545`).  The generator calls `write_ndx(sock_f_out, ndx)` in `itemize()` (`.upstream/generator.c:591-592`, `if (ndx >= 0) ... write_ndx(sock_f_out, ndx);`), which writes the compressed NDX bytes through the (mux-wrapping) output.
 
 2. **What I/O mode does the daemon use to send file data to the receiver?** Multiplexed (MSG_DATA frames).  Source: `.upstream/main.c:1293`, `io_start_multiplex_out(f_out);` (`io_start_multiplex_out(f_out)` for proto ≥ 23).
 
 3. **Does the receiver read from the daemon socket using mux or buffered input?** Multiplexed for proto ≥ 23.  Source: `.upstream/main.c:1398-1399`, `if (protocol_version >= 23) ... io_start_multiplex_in(f_in);` (`if (protocol_version >= 23) io_start_multiplex_in(f_in);` in `client_run()` receiver path).
 
-4. **What wire format does NDX_DONE have on the daemon socket vs the internal pipe?** 1 byte `0x00` on socket for proto ≥ 30 (compressed NDX, buffered), 4 bytes `0xFFFFFFFF` on pipe (int32 LE of -1, multiplexed).  Source: Generator: `.upstream/io.c:2503-2547`, `void write_ndx(int f, int32 ndx) ... }` (`write_ndx()`; NDX_DONE branch at `.upstream/io.c:2519-2522`, `} else if (ndx == NDX_DONE) { ... return;`, proto < 30 / batch fallback at `.upstream/io.c:2509-2512`, `if (protocol_version < 30 || read_batch) { ... }`).  Receiver: `.upstream/receiver.c:860`, `write_int(f_out, NDX_DONE);` (`write_int(f_out, NDX_DONE)`).
+4. **What wire format does NDX_DONE have on the daemon socket vs the internal pipe?** 1 byte `0x00` on socket for proto ≥ 30 (compressed NDX, raw for proto < 30 / MSG_DATA-framed for proto ≥ 30), 4 bytes `0xFFFFFFFF` on pipe (int32 LE of -1, multiplexed).  Source: Generator: `.upstream/io.c:2503-2547`, `void write_ndx(int f, int32 ndx) ... }` (`write_ndx()`; NDX_DONE branch at `.upstream/io.c:2519-2522`, `} else if (ndx == NDX_DONE) { ... return;`, proto < 30 / batch fallback at `.upstream/io.c:2509-2512`, `if (protocol_version < 30 || read_batch) { ... }`).  Receiver: `.upstream/receiver.c:860`, `write_int(f_out, NDX_DONE);` (`write_int(f_out, NDX_DONE)`).
 
-5. **What I/O mode does the daemon use to read selectors from the generator on proto 32?** Buffered (raw bytes).  Source: `.upstream/main.c:991`, `io_start_buffering_in(f_in);` (`io_start_buffering_in(f_in)` in `do_server_sender()`).  Although `start_server()` sets multiplexed input for proto ≥ 30 (because `need_messages_from_generator` is always 1 at `.upstream/compat.c:788`, `need_messages_from_generator = 1;`, set for all processes), `do_server_sender()` switches to buffered input before reading selectors.  The multiplexed input is only used for the filter list phase.
+5. **What I/O mode does the daemon use to read selectors from the generator on proto 32?** Multiplexed (MSG_DATA frames).  Source: `start_server()` sets multiplexed input for proto ≥ 30 because `need_messages_from_generator` is always 1 (`.upstream/main.c:1311`, `io_start_multiplex_in(f_in);`; `.upstream/compat.c:788`, `need_messages_from_generator = 1;`, set for all processes).  `do_server_sender()` calls `io_start_buffering_in(f_in)` (`.upstream/main.c:991`) before the selector loop, but that only allocates the I/O buffer and does not clear the multiplex flag (`.upstream/io.c:1547-1565`), so the filter list, selectors, stats, and final goodbye are all read through multiplexed input.
 
 6. **How does the SSH/rsh version exchange differ from the daemon socket greeting?** Binary `write_int`/`read_int` when `remote_protocol == 0` (`.upstream/compat.c:602-609`, `if (remote_protocol == 0) { ... protocol_version = remote_protocol;`), vs text `@RSYNCD:` parse (`.upstream/clientserver.c:209`, `if (sscanf(buf, "@RSYNCD: %d.%d", &remote_protocol, &remote_sub) < 1) {`).
 

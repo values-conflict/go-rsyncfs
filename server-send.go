@@ -81,20 +81,23 @@ func (s *Server) doServerSender(rw io.ReadWriter, h *handshakeResult) error {
 		preserveHlinks:  h.preserveHlinks,
 		mod:             h.module,
 	}
-	// From proto 30 on both directions are multiplexed: every write is
-	// framed as an MSG_DATA chunk and the reader must splice the chunk
-	// payloads back into a raw stream.  Proto 23 through 29 are
-	// asymmetric: the daemon's output is framed while the client's is
-	// plain bytes, so only the writer gets the framing here.
-	// (upstream io_start_multiplex_out in start_server, and the
-	// matching io_start_multiplex_in in client_run).
+	// The daemon's output is multiplexed on every supported protocol
+	// version (upstream io_start_multiplex_out in rsync_module for proto
+	// < 23 and in start_server for proto >= 23; the client's --sender
+	// argument makes the daemon the sender, so the proto < 23 branch
+	// always applies).  For proto < 23 the mux was already started in
+	// doHandshake before the seed, so reuse its writer; otherwise the
+	// mux starts here.  The client's output only becomes framed from
+	// proto 30 on (upstream io_start_multiplex_out in client_run), so
+	// below that the input stays a plain byte stream.
+	if h.outMw != nil {
+		st.mw = h.outMw
+	} else {
+		st.mw = mux.NewWriter(rw)
+	}
+	st.out = st.mw
 	if h.ver >= 30 {
-		st.mw = mux.NewWriter(rw)
-		st.out = st.mw
 		st.in = mux.NewReader(rw)
-	} else if h.ver >= 23 {
-		st.mw = mux.NewWriter(rw)
-		st.out = st.mw
 	}
 	// Push pending mux output to the wire before each read.  Upstream's
 	// iobuf does the same inside perform_io: whenever it blocks waiting

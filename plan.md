@@ -332,7 +332,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 ## Phase 3: Client
 
-### Task 15 -- Client struct & Connect
+### ~~Task 15 -- Client struct & Connect~~
 
 **Goal:** Define the `Client` config struct and implement connection establishment + handshake from the client side.  Returns a `Session` ready for FS operations.
 
@@ -351,12 +351,14 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 **Tests:**
 
-- Client connects to Server through io.Pipe() -- full handshake round-trip
-- Version negotiation works correctly in both directions
+- Client connects to Server through a buffered in-memory pipe (net.Pipe/io.Pipe deadlock on the vstring exchange, where both sides write their list before reading the peer's) -- full handshake round-trip, file list pulled through the session's mux input
+- Version negotiation works in both directions (client caps the server's version, server caps the client's), across every supported version range including the proto 20-22 muxed-seed path
 - Connect(nil) with ConnectFunc creates connection automatically
 - Connect(nil) without ConnectFunc returns error
-- PasswordAuth produces correct md4/md5 digests
-- Compat flags: client sends -e argument with feature flags, reads server compat flags
+- PasswordAuth produces correct md4/md5 digests; auth failure surfaces the server's @ERROR
+- Compat flags: client sends -e argument with feature flags, reads server compat flags, negotiates algorithms via vstring when CF_VARINT_FLIST_FLAGS is set
+- Proto 20-22 against the in-repo server: the daemon's output is multiplexed before setup_protocol (rsync_module), so the seed arrives MSG_DATA-framed and the client reads it through the mux input
+- MOTD tolerance: ReadAuthChallenge skips the non-@RSYNCD lines (MOTD, including the bare newline a daemon sends for an unreadable motd file) the daemon interleaves before the OK
 
 ### Task 16 -- Client: Session.Open
 

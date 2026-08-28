@@ -54,6 +54,11 @@ func ReadModuleRequest(r io.Reader) (string, error) {
 	return readLine(r)
 }
 
+// WriteModuleRequest writes a module name (#list or actual module) as a newline-terminated line.
+func WriteModuleRequest(w io.Writer, moduleName string) error {
+	return writeLine(w, moduleName)
+}
+
 // ModuleInfo holds the name and comment of a single rsync module.
 type ModuleInfo struct {
 	Name    string
@@ -76,34 +81,45 @@ func WriteModuleList(w io.Writer, modules []ModuleInfo, version int) error {
 	return nil
 }
 
-// ReadAuthChallenge reads an AUTHREQD line and returns the base64-decoded challenge.
-// Returns nil, nil if the server sends @RSYNCD: OK (no auth required).
-// Returns an error if the server sends an @ERROR: line.
+// ReadAuthChallenge reads the server's response to a module request and
+// returns the base64-decoded auth challenge.  It returns nil, nil if the
+// server sends @RSYNCD: OK (authenticated or no auth required), and an
+// error for an @ERROR: line or an @RSYNCD: EXIT.
+//
+// Lines that are none of the above are MOTD (or module-listing) lines the
+// daemon may interleave before the answer; the upstream client reads and
+// drops them (start_inband_exchange's response loop), so this skips them
+// and keeps reading.
 func ReadAuthChallenge(r io.Reader) ([]byte, error) {
-	line, err := readLine(r)
-	if err != nil {
-		return nil, err
-	}
+	for {
+		line, err := readLine(r)
+		if err != nil {
+			return nil, err
+		}
 
-	if err := ParseError(line); err != nil {
-		return nil, err
-	}
+		if err := ParseError(line); err != nil {
+			return nil, err
+		}
 
-	if strings.HasPrefix(line, "@RSYNCD: OK") {
-		return nil, nil
-	}
+		if strings.HasPrefix(line, "@RSYNCD: OK") {
+			return nil, nil
+		}
 
-	challenge, ok := strings.CutPrefix(line, "@RSYNCD: AUTHREQD ")
-	if !ok {
-		return nil, fmt.Errorf("unexpected server response: %s", line)
-	}
+		if strings.HasPrefix(line, "@RSYNCD: EXIT") {
+			return nil, fmt.Errorf("server exited the module connection: %s", line)
+		}
 
-	challenge = strings.TrimSpace(challenge)
-	data, err := base64.StdEncoding.DecodeString(challenge)
-	if err != nil {
-		return nil, fmt.Errorf("decode auth challenge: %w", err)
+		if challenge, ok := strings.CutPrefix(line, "@RSYNCD: AUTHREQD "); ok {
+			challenge = strings.TrimSpace(challenge)
+			data, err := base64.StdEncoding.DecodeString(challenge)
+			if err != nil {
+				return nil, fmt.Errorf("decode auth challenge: %w", err)
+			}
+			return data, nil
+		}
+
+		// MOTD line: skip and read the next response
 	}
-	return data, nil
 }
 
 // WriteAuthChallenge writes an AUTHREQD line with base64-encoded challenge.

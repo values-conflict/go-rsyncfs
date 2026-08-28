@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/values-conflict/go-rsyncfs/protocol"
+	"github.com/values-conflict/go-rsyncfs/protocol/mux"
 )
 
 // HandleConnection runs the full rsync daemon protocol on a single connection, sequentially: the pre-transfer handshake (greeting, module selection, auth, arguments, compat flags, algorithm negotiation, checksum seed), then the transfer phase in [(*Server).doServerSender].
@@ -49,6 +50,13 @@ type handshakeResult struct {
 
 	checksum string // negotiated strong-hash name
 	seed     int32
+
+	// outMw is the mux writer started in doHandshake for proto < 23,
+	// where upstream muxes the daemon's output in rsync_module before
+	// setup_protocol writes the seed.  Nil from proto 23 on, where the
+	// mux starts in doServerSender (upstream start_server) after the
+	// seed.
+	outMw *mux.Writer
 }
 
 // doHandshake runs the pre-transfer handshake in raw (unmultiplexed) I/O:
@@ -171,7 +179,18 @@ func (s *Server) doHandshake(rw io.ReadWriter) (*handshakeResult, error) {
 	if seed == 0 {
 		seed = 32761
 	}
-	if err := protocol.WriteChecksumSeed(rw, seed); err != nil {
+	// The daemon's output multiplexing starts right after argument
+	// parsing (upstream io_start_multiplex_out in rsync_module), so for
+	// proto < 23 the seed is already framed; for proto 23 and up the
+	// switch happens in start_server after setup_protocol, so the seed
+	// stays plain bytes there.
+	seedWriter := io.Writer(rw)
+	var outMw *mux.Writer
+	if version < 23 {
+		outMw = mux.NewWriter(rw)
+		seedWriter = outMw
+	}
+	if err := protocol.WriteChecksumSeed(seedWriter, seed); err != nil {
 		return nil, fmt.Errorf("write checksum seed: %w", err)
 	}
 
@@ -186,6 +205,7 @@ func (s *Server) doHandshake(rw io.ReadWriter) (*handshakeResult, error) {
 		preserveHlinks: preserveHlinks,
 		checksum:       checksum,
 		seed:           seed,
+		outMw:          outMw,
 	}, nil
 }
 

@@ -78,32 +78,6 @@ func computeAuthHash(digest string, password string, challenge []byte) ([]byte, 
 	return h.Sum(nil), nil
 }
 
-// Session holds an active connection to an rsync daemon, ready for FS operations.
-// In root mode (Module == ""), the Session is a config holder -- connectFunc creates fresh connections for each operation.
-//
-// Session is not safe for concurrent use.  The rsync protocol is sequential:
-// selectors are sent one-at-a-time through a single-phase loop, and the
-// compressed NDX encoder maintains shared delta state.
-type Session struct{}
-
-var _ fs.FS = (*Session)(nil)
-
-// Connect runs the full handshake and returns an active session.
-// If rw is nil and Client.ConnectFunc is set, ConnectFunc creates the connection.
-// For root mode (Module == ""), use OpenRoot instead.
-func (c Client) Connect(rw io.ReadWriter) (*Session, error) {
-	// TODO implement (Task 15)
-	return nil, nil
-}
-
-// OpenRoot returns a Session for root mode (modules as top-level directories).
-// Does not establish a live connection -- each FS operation gets its own.
-// Requires Client.ConnectFunc to be set.
-func (c Client) OpenRoot() (*Session, error) {
-	// TODO implement (Task 15)
-	return nil, nil
-}
-
 // Open implements fs.FS.  Opens the named file or directory within the module.
 func (s *Session) Open(name string) (fs.File, error) {
 	// TODO implement (Task 16)
