@@ -653,7 +653,7 @@ func (s *Server) HandleConnection(rw io.ReadWriter) error
 - `HandleConnection` is the single entry point -- one call per connection.  The Server itself is stateless and reusable.
 - `Server.Greeting` and `ServerModule.AuthCallback` are direct fields, not passed per-call.  This prevents per-connection config mutation and keeps the API surface minimal -- there's no `HandleOptions` struct to wire up on every call.
 - Auth is per-module (via `ServerModule.AuthCallback`), matching rsync's per-module secrets file model.
-- The server reads selectors from the raw connection (buffered I/O) and writes data through the mux layer.  This I/O mode split is internal to `HandleConnection`.
+- The server's output is multiplexed on every supported protocol version (started in the handshake for proto < 23, in the transfer phase for proto 23 and up); its input (filter list, selectors) is multiplexed for proto >= 30 and raw below.  This I/O mode split is internal to `HandleConnection`.
 - The server enforces a handshake timeout (default 60 seconds) on the pre-transfer handshake (greeting, module selection, auth, argument reading).  This prevents an unauthenticated peer from holding a connection slot open indefinitely.  The timeout is internal and not currently configurable.
 - Peer-supplied `MSG_IO_ERROR` values are masked against `IOERRValidMask` before use, preventing a malicious peer from setting arbitrary undefined bits in the local `io_error`.
 
@@ -823,16 +823,19 @@ The root `rsyncfs/` package composes `protocol/` primitives into the full handsh
                      protocol.WriteCompatFlags(rw, compatFlags, version)
 9. if CF_VARINT_FLIST_FLAGS: protocol.NegotiateAlgorithms(rw, checksums, compressions)
    else: protocol.DefaultAlgorithms(version)
-10. protocol.WriteChecksumSeed(rw, seed)
-11. <- switch to multiplexed I/O for daemon->client channel
+10. if version < 23: start mux writer (the daemon muxes its output before
+                      setup_protocol, so the seed goes out in an MSG_DATA frame)
+    protocol.WriteChecksumSeed(muxWriter-or-rw, seed)
+11. <- switch to multiplexed I/O: daemon->client channel always;
+      client->daemon channel for proto >= 30 (mux reader)
 12. sendFileList(muxWriter, module.FS, ".", version, varintFlags)
 13. <- phase exchange + selector loop
     for each phase:
-        read selectors from raw connection (buffered)
+        read selectors via muxReader (proto >= 30) or raw connection (proto < 30)
         for each selector with ItemTransfer:
             echo selector via muxWriter
             sendFile(muxReader, muxWriter, file, version, seed)
-        read NDX_DONE from raw connection
+        read NDX_DONE the same way
         echo NDX_DONE via muxWriter
 14. <- final goodbye exchange
 15. <- stats exchange
@@ -847,30 +850,37 @@ Connect():
 3. protocol.ReadGreeting(rw)  -> serverGreeting
 4. protocol.Negotiate(clientGreeting, serverGreeting) -> version, subProto, digest
 5. send module name as text line
-6. read server response: AUTHREQD, OK, or ERROR
+6. read server response: AUTHREQD, OK, or ERROR (skip interleaved MOTD lines)
 7. if AUTHREQD: compute auth response, protocol.WriteAuthResponse(rw, user, hash)
-8. protocol.WriteArgs(rw, args, version)  -- --server --sender flags . e0v
+8. protocol.WriteArgs(rw, args, version)  -- --server --sender <flags> . <module>/
 9. if version >= 30: protocol.ReadCompatFlags(rw, version) -> compatFlags
 10. if CF_VARINT_FLIST_FLAGS: protocol.NegotiateAlgorithms(rw, checksums, compressions)
     else: protocol.DefaultAlgorithms(version)
-11. protocol.ReadChecksumSeed(rw) -> seed
-12. <- switch to multiplexed I/O for daemon->client channel
-13. return Session
+11. if version < 23: start mux reader (the daemon's output mux is already on,
+                      so the seed arrives in an MSG_DATA frame)
+    protocol.ReadChecksumSeed(muxReader-or-rw) -> seed
+    if version >= 30: start mux writer (client output is raw below)
+12. <- wrap input with flush-before-read (flush the mux writer before each
+      mux read, mirroring upstream's flush-while-waiting iobuf)
+13. protocol.WriteInt32(out, 0) -- empty filter list (raw for proto < 30,
+                      MSG_DATA-framed for proto >= 30)
+14. return Session
 
 Session.Open(name):
 1. readFileList() -- read from muxReader, parse with protocol.FlistReader
-2. phaseExchange() -- send NDX_DONE raw, read NDX_DONE from mux
+2. phaseExchange() -- send NDX_DONE via out (mux for proto >= 30, raw below),
+   read NDX_DONE from muxReader
 3. find target entry by name
 4. if directory: return directory entries from file list
 5. if regular file:
-   a. writeSelector(ndx, ItemTransfer|ItemMissingData) -- raw bytes
+   a. writeSelector(ndx, ItemTransfer|ItemMissingData) via out (mux for
+      proto >= 30, raw below)
    b. read sum_head from muxReader
    c. read block checksums from muxReader
-   d. write delta stream to raw connection -- raw bytes
-   e. read file data from muxReader
-   f. read file checksum from muxReader (verify)
-   g. send MSG_SUCCESS with ndx via muxWriter
-   h. return file with data
+   d. read delta stream from muxReader (match tokens / literal data)
+   e. read file checksum from muxReader (verify)
+   f. send MSG_SUCCESS with ndx via muxWriter (proto >= 30)
+   g. return file with data
 ```
 
 ## Key design decisions
