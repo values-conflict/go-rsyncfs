@@ -65,9 +65,16 @@ func rsyncBinPaths(t *testing.T) []string {
 	t.Helper()
 	repoRoot := repoRootDir(t)
 	var bins []string
+	// The bare "rsync" is the .upstream build when it exists; otherwise
+	// fall back to an rsync on PATH (the submodule may be uncloned or the
+	// build may be absent).  Either way its advertised protocol is not
+	// documented, so it is keyed as the sentinel "rsync" in
+	// daemonProtoVersion.
 	build := filepath.Join(repoRoot, ".upstream", "rsync")
 	if info, err := os.Stat(build); err == nil && !info.IsDir() {
 		bins = append(bins, build)
+	} else if pathRsync, err := exec.LookPath("rsync"); err == nil {
+		bins = append(bins, pathRsync)
 	}
 	oldVersions := filepath.Join(repoRoot, ".upstream", "old_versions")
 	if dirs, err := os.ReadDir(oldVersions); err == nil {
@@ -78,19 +85,23 @@ func rsyncBinPaths(t *testing.T) []string {
 		}
 	}
 	if len(bins) == 0 {
-		t.Skip("no rsync binary found in .upstream/ or .upstream/old_versions/")
+		t.Skip("no rsync binary found in .upstream/, .upstream/old_versions/, or on PATH")
 	}
 	return bins
 }
 
-// repoRootDir finds the repository root by looking for the .upstream
-// directory.
+// repoRootDir finds the repository root.  It prefers a directory that
+// holds the .upstream submodule, but the tests run from the package
+// directory (the repo root) regardless, so when the submodule is not
+// cloned it falls back to the working directory rather than failing --
+// the PATH lookup in rsyncBinPaths still works without it.
 func repoRootDir(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()
 	if err != nil {
 		t.Fatal("getwd: ", err)
 	}
+	root := dir
 	for i := 0; i < 10; i++ {
 		if _, err := os.Stat(filepath.Join(dir, ".upstream")); err == nil {
 			return dir
@@ -101,8 +112,7 @@ func repoRootDir(t *testing.T) string {
 		}
 		dir = parent
 	}
-	t.Fatal("could not find repository root (no .upstream directory)")
-	return ""
+	return root
 }
 
 // TestIntegration_RsyncClientPull pulls a real directory tree from the

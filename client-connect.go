@@ -45,8 +45,11 @@ type Session struct {
 	id0Names    bool // CF_ID0_NAMES negotiated
 
 	moduleName  string
-	ndx         *protocol.NdxState                  // compressed NDX delta state for the selector phase
+	ndx         *protocol.NdxState                  // compressed NDX delta state for sending selectors (generator role)
+	recvNdx     *protocol.NdxState                  // compressed NDX delta state for reading echoed selectors (receiver role); upstream keeps the read and write NDX delta trackers separate
 	connectFunc func(string) (io.ReadWriter, error) // root mode: fresh connections per operation
+
+	consumed bool // true once the current connection ran its phase exchange and was closed
 }
 
 var _ fs.FS = (*Session)(nil)
@@ -68,6 +71,38 @@ func (c Client) Connect(rw io.ReadWriter) (*Session, error) {
 		}
 	}
 
+	s := &Session{}
+	if err := c.runHandshake(rw, s); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// runHandshake runs the full pre-transfer handshake on rw and fills in the
+// session's live-connection state in place.  It is the body of [Client.Connect]
+// split out so [Session.Open] can re-establish a connection after the
+// previous one was consumed by a transfer.
+func (c Client) runHandshake(rw io.ReadWriter, s *Session) error {
+	s.client = &c
+	s.rw = rw
+	s.out = rw
+	s.in = nil
+	s.mr = nil
+	s.mw = nil
+	s.version = 0
+	s.subProtocol = 0
+	s.digest = ""
+	s.checksum = ""
+	s.seed = 0
+	s.compatFlags = 0
+	s.varintFlist = false
+	s.seedFix = false
+	s.id0Names = false
+	s.moduleName = c.Module
+	s.ndx = protocol.NewNdxState()
+	s.recvNdx = protocol.NewNdxState()
+	s.consumed = false
+
 	greet := c.Greeting
 	greet.ApplyDefaults()
 
@@ -76,51 +111,43 @@ func (c Client) Connect(rw io.ReadWriter) (*Session, error) {
 	// read_line_old); the lines are small enough that a real rsync pair never
 	// deadlocks on the simultaneous write.
 	if err := protocol.WriteGreeting(rw, greet); err != nil {
-		return nil, fmt.Errorf("write greeting: %w", err)
+		return fmt.Errorf("write greeting: %w", err)
 	}
 	serverGreet, err := protocol.ReadGreeting(rw)
 	if err != nil {
-		return nil, fmt.Errorf("read server greeting: %w", err)
+		return fmt.Errorf("read server greeting: %w", err)
 	}
 	version, subProtocol, digest, err := protocol.Negotiate(greet, *serverGreet)
 	if err != nil {
-		return nil, fmt.Errorf("negotiate protocol version: %w", err)
+		return fmt.Errorf("negotiate protocol version: %w", err)
 	}
-
-	s := &Session{
-		client:      &c,
-		rw:          rw,
-		out:         rw,
-		version:     version,
-		subProtocol: subProtocol,
-		digest:      digest,
-		moduleName:  c.Module,
-		ndx:         protocol.NewNdxState(),
-	}
+	s.version = version
+	s.subProtocol = subProtocol
+	s.digest = digest
 
 	// Module selection + authentication.  The server answers the module line
 	// with a challenge (AUTHREQD), OK, or @ERROR; the upstream client loops on
 	// the response (clientserver.c rsync_module), so we do the same.
 	if err := protocol.WriteModuleRequest(rw, c.Module); err != nil {
-		return nil, fmt.Errorf("send module request: %w", err)
+		return fmt.Errorf("send module request: %w", err)
 	}
 	for {
 		challenge, err := protocol.ReadAuthChallenge(rw)
 		if err != nil {
-			return nil, fmt.Errorf("read server response: %w", err)
+			return fmt.Errorf("read server response: %w", err)
 		}
 		if challenge == nil { // @RSYNCD: OK
 			break
 		}
 		if c.AuthUser == "" || c.AuthResponse == nil {
-			return nil, fmt.Errorf("server requires authentication but AuthUser/AuthResponse are not set")
+			return fmt.Errorf("server requires authentication but AuthUser/AuthResponse are not set")
 		}
 		digestBytes, err := c.AuthResponse(digest, challenge)
 		if err != nil {
-			return nil, fmt.Errorf("compute auth response: %w", err)
+			return fmt.Errorf("compute auth response: %w", err)
 		}
 		if err := protocol.WriteAuthResponse(rw, c.AuthUser, digestBytes); err != nil {
-			return nil, fmt.Errorf("send auth response: %w", err)
+			return fmt.Errorf("send auth response: %w", err)
 		}
 	}
 
@@ -130,7 +157,7 @@ func (c Client) Connect(rw io.ReadWriter) (*Session, error) {
 	// out as "/".
 	args := []string{"--server", "--sender", transferArgstr(version), ".", c.Module + "/"}
 	if err := protocol.WriteArgs(rw, args, version); err != nil {
-		return nil, fmt.Errorf("send arguments: %w", err)
+		return fmt.Errorf("send arguments: %w", err)
 	}
 
 	// Compat flags + algorithm negotiation (proto >= 30 only).  The daemon
@@ -142,7 +169,7 @@ func (c Client) Connect(rw io.ReadWriter) (*Session, error) {
 	if version >= 30 {
 		compatFlags, err := protocol.ReadCompatFlags(rw, version)
 		if err != nil {
-			return nil, fmt.Errorf("read compat flags: %w", err)
+			return fmt.Errorf("read compat flags: %w", err)
 		}
 		s.compatFlags = compatFlags
 		s.varintFlist = compatFlags&protocol.CompatVarintFlistFlags != 0
@@ -152,7 +179,7 @@ func (c Client) Connect(rw io.ReadWriter) (*Session, error) {
 		if s.varintFlist {
 			algos, err := protocol.NegotiateAlgorithms(rw, protocol.SupportedDigests(), nil)
 			if err != nil {
-				return nil, fmt.Errorf("negotiate algorithms: %w", err)
+				return fmt.Errorf("negotiate algorithms: %w", err)
 			}
 			s.checksum = algos.Checksum
 		} else {
@@ -183,7 +210,7 @@ func (c Client) Connect(rw io.ReadWriter) (*Session, error) {
 	}
 	seed, err := protocol.ReadChecksumSeed(seedReader)
 	if err != nil {
-		return nil, fmt.Errorf("read checksum seed: %w", err)
+		return fmt.Errorf("read checksum seed: %w", err)
 	}
 	s.seed = seed
 
@@ -200,10 +227,10 @@ func (c Client) Connect(rw io.ReadWriter) (*Session, error) {
 	// Filter list.  Always sent (even when empty: the terminating int32 0),
 	// after the mux switch so the daemon's mux input is ready for it.
 	if err := protocol.WriteInt32(s.out, 0); err != nil {
-		return nil, fmt.Errorf("send filter list: %w", err)
+		return fmt.Errorf("send filter list: %w", err)
 	}
 
-	return s, nil
+	return nil
 }
 
 // OpenRoot returns a Session for root mode (modules as top-level directories).  Unlike [Client.Connect], it does not establish a live connection -- each FS operation gets its own connection via [Client.ConnectFunc] (the server closes the connection after #list, so a single persistent connection is not possible).

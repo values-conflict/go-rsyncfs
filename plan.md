@@ -360,7 +360,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 - Proto 20-22 against the in-repo server: the daemon's output is multiplexed before setup_protocol (rsync_module), so the seed arrives MSG_DATA-framed and the client reads it through the mux input
 - MOTD tolerance: ReadAuthChallenge skips the non-@RSYNCD lines (MOTD, including the bare newline a daemon sends for an unreadable motd file) the daemon interleaves before the OK
 
-### Task 16 -- Client: Session.Open
+### ~~Task 16 -- Client: Session.Open~~
 
 **Goal:** Implement `fs.FS.Open` for the client side.  Opening a directory reads the file list; opening a file triggers the rsync data transfer protocol.
 
@@ -418,7 +418,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 - Empty directories handled without errors
 - Run `testing/fstest.TestFS` against Client+Server pair
 
-### Task 19 -- Upstream rsync integration tests
+### ~~Task 19 -- Upstream rsync integration tests~~
 
 **Goal:** Tests that connect our library to the real `rsync` binary.  Skipped with `-short` or when `rsync` is not found.  Prefer `.upstream/rsync` if it exists, then any `rsync` on `PATH`.
 
@@ -426,8 +426,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 **Tests (client-side):**
 
-- Start `rsync --daemon`, connect our Client, verify FS operations match expectations
-- Prefer Unix sockets to avoid port management
+- Start `rsync --daemon` on an ephemeral localhost TCP port (rsync's daemon mode has no Unix-socket listener); connect our Client and verify FS operations (file pulls, root and subdirectory listings, symlink resolution) match expectations
 
 **Tests (server-side):**
 
@@ -436,7 +435,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 **Process management:** All started rsync processes must be killed on test completion.  No orphans.
 
-### Task 20 -- Multi-version upstream integration tests
+### ~~Task 20 -- Multi-version upstream integration tests~~
 
 **Goal:** Integration tests that connect our library against each binary in `.upstream/old_versions/` (rsync 2.6.0 through 3.4.1, covering protocol versions 27, 30, 31, 32).  Skipped with `-short` or when specific binaries are missing.
 
@@ -445,18 +444,18 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 **Tests (client-side):**
 
 - Our Client connects to each `rsync_<version> --daemon`, verify FS operations (list, read) work correctly
-- Protocol negotiation: verify correct version is selected per binary's advertised protocol range
+- Protocol negotiation: verify the negotiated version equals each binary's advertised protocol -- documented in `.upstream/old_versions/README.md` for the pinned builds, read from the bare `rsync`'s own `--version` output ("... protocol version N") otherwise
 - Version-specific behavior: features gated by protocol version (varint flist ≥ 30, mod_nsec ≥ 31) work or gracefully degrade
 
 **Tests (server-side):**
 
 - Each `rsync_<version>` client pulls from our Server
 - Verify transfers succeed across the full protocol version range our server supports
-- Version-safe CLI flags per binary: 2.6.0 predates `--log-file` / `-vvv`, so per-version flag sets (eg `-vlogDtpre` for the preserve bits on old builds)
+- Version-safe CLI flags: the pull uses `-a` (archive), which every pinned build supports, so no per-version flag sets are needed
 
-**Process management:** All started rsync processes must be killed on test completion.  No orphans.  Prefer Unix sockets.
+**Process management:** All started rsync processes must be killed on test completion.  No orphans.
 
-**Binary discovery:** Scan `.upstream/old_versions/` for `rsync_*` binaries at test time; skip any not found.
+**Binary discovery:** Use the `.upstream/rsync` build when present, else a `rsync` on `PATH`, plus every `rsync_*` binary in `.upstream/old_versions/`; skip any not found.
 
 ### Task 21 -- Ported upstream security & edge-case tests
 

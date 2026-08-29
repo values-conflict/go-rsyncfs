@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"hash"
 	"io"
-	"io/fs"
 
 	"golang.org/x/crypto/md4"
 
@@ -76,10 +75,4 @@ func computeAuthHash(digest string, password string, challenge []byte) ([]byte, 
 		return nil, err
 	}
 	return h.Sum(nil), nil
-}
-
-// Open implements fs.FS.  Opens the named file or directory within the module.
-func (s *Session) Open(name string) (fs.File, error) {
-	// TODO implement (Task 16)
-	return nil, nil
 }

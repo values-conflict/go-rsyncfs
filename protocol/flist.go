@@ -353,12 +353,23 @@ func (r *FlistReader) ReadEntry() (*FlistEntry, error) {
 		}
 	}
 
-	// symlink target -- length is varint30 in every protocol version
+	// symlink target -- length is varint30: an int32 below proto 30, a
+	// varint from there on
 	isSymlink := (entry.Mode & 0o170000) == 0o120000
 	if r.preserveLinks && isSymlink {
-		lenVal, err := ReadVarint(r.r)
-		if err != nil {
-			return nil, err
+		var lenVal int32
+		if r.version < 30 {
+			v, e := ReadInt32(r.r)
+			if e != nil {
+				return nil, e
+			}
+			lenVal = v
+		} else {
+			v, e := ReadVarint(r.r)
+			if e != nil {
+				return nil, e
+			}
+			lenVal = v
 		}
 		if lenVal > 0 {
 			targetData := make([]byte, lenVal)
@@ -689,11 +700,19 @@ func (w *FlistWriter) WriteEntry(e *FlistEntry) error {
 		}
 	}
 
-	// symlink target -- length is varint30 in every protocol version
+	// symlink target -- length is varint30: an int32 below proto 30, a
+	// varint from there on
 	isSymlink := (e.Mode & 0o170000) == 0o120000
 	if w.preserveLinks && isSymlink {
-		if err := WriteVarint(w.w, int32(len(e.LinkTarget))); err != nil {
-			return err
+		varLen := int32(len(e.LinkTarget))
+		if w.version < 30 {
+			if err := WriteInt32(w.w, varLen); err != nil {
+				return err
+			}
+		} else {
+			if err := WriteVarint(w.w, varLen); err != nil {
+				return err
+			}
 		}
 		if len(e.LinkTarget) > 0 {
 			if _, err := w.w.Write([]byte(e.LinkTarget)); err != nil {
