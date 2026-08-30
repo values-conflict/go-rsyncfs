@@ -405,9 +405,9 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 ## Phase 4: Integration & Polish
 
-### Task 18 -- Cross-implementation tests
+### ~~Task 18 -- Cross-implementation tests~~
 
-**Goal:** Integration tests connecting Client directly to Server through `net.Pipe()` with embedded test fixtures.  Run `testing/fstest.TestFS` as additional validation.
+**Goal:** Integration tests connecting Client directly to Server over buffered in-memory pipes (`net.Pipe()` deadlocks on the greeting exchange, which writes before it reads) with embedded test fixtures.  Run `testing/fstest.TestFS` as additional validation.
 
 **Files:** `cross_test.go`, `testdata/` (embedded fixtures)
 
