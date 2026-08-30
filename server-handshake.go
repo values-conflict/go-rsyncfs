@@ -16,8 +16,6 @@ import (
 //
 // The rw is the underlying transport (TCP socket, pipe, etc).  The call blocks until the connection is complete; it returns nil for clean disconnects and #list requests, or an error that aborted the protocol.
 func (s *Server) HandleConnection(rw io.ReadWriter) error {
-	s.Greeting.ApplyDefaults()
-
 	result, err := s.doHandshake(rw)
 	if err != nil {
 		return err
@@ -65,8 +63,11 @@ type handshakeResult struct {
 // (upstream start_server + clientserver.c).  It returns a nil result for
 // clean disconnects and #list requests.
 func (s *Server) doHandshake(rw io.ReadWriter) (*handshakeResult, error) {
-	// greeting exchange
-	if err := protocol.WriteGreeting(rw, s.Greeting); err != nil {
+	// greeting exchange -- copy s.Greeting so the (shared, reusable) Server
+	// is not mutated by the defaults fill
+	greeting := s.Greeting
+	greeting.ApplyDefaults()
+	if err := protocol.WriteGreeting(rw, greeting); err != nil {
 		return nil, fmt.Errorf("write greeting: %w", err)
 	}
 	clientGreeting, err := protocol.ReadGreeting(rw)
@@ -74,7 +75,7 @@ func (s *Server) doHandshake(rw io.ReadWriter) (*handshakeResult, error) {
 		_ = protocol.WriteError(rw, "invalid greeting")
 		return nil, fmt.Errorf("read client greeting: %w", err)
 	}
-	version, _, _, err := protocol.Negotiate(*clientGreeting, s.Greeting)
+	version, _, _, err := protocol.Negotiate(*clientGreeting, greeting)
 	if err != nil {
 		_ = protocol.WriteError(rw, "protocol version negotiation failed")
 		return nil, fmt.Errorf("negotiate version: %w", err)
@@ -173,6 +174,7 @@ func (s *Server) doHandshake(rw io.ReadWriter) (*handshakeResult, error) {
 	// A zero seed changes the legacy block checksums (old rsync only
 	// mixes the seed in when it is non-zero), so keep it non-zero.
 	seed := int32(time.Now().UnixNano())
+	var seedBuf [4]byte
 	if _, err := rand.Read(seedBuf[:]); err == nil {
 		seed = int32(binary.LittleEndian.Uint32(seedBuf[:]))
 	}
@@ -222,8 +224,6 @@ func serverCapabilities() int {
 		protocol.CompatChksumSeedFix |
 		protocol.CompatVarintFlistFlags
 }
-
-var seedBuf [4]byte
 
 // hashEqual compares two byte slices in constant time to avoid timing
 // attacks.

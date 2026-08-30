@@ -387,7 +387,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 - Root mode: ReadDir on root does live #list call (fresh connection)
 - Root mode: entering a module directory opens separate connection to that module
 
-### Task 17 -- Example functions
+### ~~Task 17 -- Example functions~~
 
 **Goal:** Add `ExampleXXX` Go testing functions that demonstrate how to create and use a TCP-based rsync `Server` and `Client`.  Written now while the API is fresh.
 
@@ -395,12 +395,13 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 **Key details:**
 
-- `ExampleServer` -- create a `Server` with modules backed by `fs.MapFS`, listen on a TCP socket, call `HandleConnection` in a goroutine per connection
-- `ExampleClient` -- create a `Client` with `ConnectFunc` that dials TCP, connect to the server, use `Session.Open` to read files and list directories
-- `ExampleClientRootMode` -- create a `Client` with empty Module (root mode), use `OpenRoot()`, list available modules via `Session.Open(".")`, then open files within specific modules
-- Examples should be self-contained: start the server, connect the client, verify a file transfer, clean up
+- `ExampleServer` -- create a `Server` with modules backed by `fstest.MapFS`, listen on a TCP socket, call `HandleConnection` in a goroutine per connection
+- `ExampleServer_auth` -- a module with an `AuthCallback` (the secrets-file flow: digest(password + challenge) against a server-generated challenge) verified end-to-end with a `PasswordAuth` client
+- `ExampleClient` -- create a `Client` with an inline `ConnectFunc` that dials TCP, connect to the server, use `Session.Open` to read files
+- `ExampleClient_auth` -- `PasswordAuth` with the correct credentials, plus the wrong username/password rejected with the server's @ERROR
+- `ExampleClient_rootMode` -- create a `Client` with empty Module (root mode), use `OpenRoot()`, list available modules via `Session.Open(".")`, then open files within specific modules
+- Examples are self-contained: start the server, connect the client, verify a file transfer, clean up; the accept loop is shown in `ExampleServer` and a small shared `startExampleServer` test helper (with a "see ExampleServer" comment) keeps the other examples focused on their own side
 - Use `net.Listen`/`net.Dial` for TCP (not `io.Pipe` which is only for unit tests)
-- Demonstrate auth flow with `PasswordAuth` and `AuthCallback`
 
 ## Phase 4: Integration & Polish
 
