@@ -90,6 +90,18 @@ func Process(r io.Reader) (*Result, error)
 func NewClient(cfg Config) *Client
 ```
 
+**When the function's job is to hand the caller a stdlib interface, return the interface, not an exported carrier type.**  If the value *is* an `io.ReadWriteCloser`, an `io.Reader`, a `net.Conn`, etc, and the caller is going to hold it as that interface, then returning the interface and keeping the concrete type unexported is the cleaner answer.  Exporting the concrete type only earns its keep when it gives the caller something the interface cannot -- extra methods, a name with real meaning, a type they can construct or compare.  Otherwise it just names an implementation detail and grows the API surface for no value, which is a leak.
+
+```go
+// Good: the caller needs a closable read/write end; the interface is the value
+func BufPipe() (a, b io.ReadWriteCloser)
+
+// Bad: exports a type solely to be the thing behind the io.ReadWriteCloser
+func Pipe() (a, b *PipeConn) // PipeConn must be exported -> leaks the implementation
+```
+
+The same logic governs export generally: export a type only when doing so actually adds value or meaning for callers.  One caution so this does not become its own anti-pattern: this is *not* a license to invent a new interface just to have an exported seam to keep a type unexported behind -- that is the [premature-interface](#avoid-premature-interfaces) mistake in a different outfit.  The "return the interface, keep the carrier unexported" shape is clean specifically when the interface already holds its weight: a stdlib type callers already accept, or a project interface that has already earned its keep.  Don't manufacture a single-implementation interface to make the pattern available.
+
 **Connection-oriented code should accept `io.ReadWriter` or `net.Conn`.**  When a library manages a protocol over a connection, the library should accept the connection as a parameter rather than creating it internally.  This lets callers control transport details (TCP, TLS, Unix sockets, etc.) and makes testing straightforward -- tests can pass a `net.Pipe` instead of spinning up real network listeners.  See the [`net.Pipe` testing pattern](#netpipe-for-testing-connection-oriented-code) below.
 
 ### Compiler enforcement of interface satisfaction
@@ -392,7 +404,7 @@ client := &Client{
 
 Each call to `ConnectFunc` gets its own isolated pipe pair with its own server goroutine.  No TCP listener needed, and each connection is independent.
 
-**Synchronous behavior exposes protocol bugs.**  `net.Pipe` is synchronous with no internal buffering -- a write blocks until the other end reads the data (or closes its end, which fails the write with `io.ErrClosedPipe`).  This is a benefit: it catches protocol-level synchronization bugs that TCP's socket buffer would silently hide.  If the server writes a response and the client never reads it, the test hangs instead of passing -- which means the protocol has a real bug.  Fix: always drain the connection on both sides, or close the unused end to unblock the writer.  In tests that expect a server error response, read the error on the client side before asserting:
+**Synchronous behavior exposes protocol bugs.**  `net.Pipe` is synchronous with no internal buffering -- a write blocks until the other end reads the data (or closes its end, which fails the write with `io.ErrClosedPipe`).  This is a benefit: it catches protocol-level synchronization bugs that TCP's socket buffer would silently hide.  If the server writes a response and the client never reads it, the test hangs instead of passing -- which means the protocol has a real bug.  The one exception where the hang is *not* your protocol's fault: a handshake in which both sides write a preamble before reading the peer's (a greeting exchange, a feature/algorithm negotiation where each side sends its list before receiving the other's).  A real socket's buffer absorbs both preambles, but a zero-capacity pipe cannot, so both ends block in their write and the test deadlocks.  For such protocols, test against a *buffered* in-memory pipe -- one that lets a writer make progress without the reader simultaneously consuming -- rather than `net.Pipe`.  Fix for the ordinary (single-direction) case: always drain the connection on both sides, or close the unused end to unblock the writer.  In tests that expect a server error response, read the error on the client side before asserting:
 
 ```go
 // send bad auth
