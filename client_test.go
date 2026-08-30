@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -14,93 +13,12 @@ import (
 	"github.com/values-conflict/go-rsyncfs/protocol"
 )
 
-// memPipeBuf is one direction of a buffered in-memory pipe: an unbounded
-// FIFO with wait/close semantics.  Unlike net.Pipe or io.Pipe it does not
-// block a writer until the reader consumes, which the vstring algorithm
-// negotiation needs (both sides write their list before reading the
-// peer's, mirroring upstream).
-type memPipeBuf struct {
-	mu     sync.Mutex
-	cond   *sync.Cond
-	buf    bytes.Buffer
-	closed bool
-}
-
-func newMemPipeBuf() *memPipeBuf {
-	b := &memPipeBuf{}
-	b.cond = sync.NewCond(&b.mu)
-	return b
-}
-
-func (b *memPipeBuf) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.closed {
-		return 0, errMemPipeClosed
-	}
-	n, _ := b.buf.Write(p)
-	b.cond.Broadcast()
-	return n, nil
-}
-
-func (b *memPipeBuf) Read(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for b.buf.Len() == 0 && !b.closed {
-		b.cond.Wait()
-	}
-	if b.buf.Len() == 0 {
-		return 0, io.EOF
-	}
-	n, _ := b.buf.Read(p)
-	return n, nil
-}
-
-func (b *memPipeBuf) Close() error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.closed {
-		return nil
-	}
-	b.closed = true
-	b.cond.Broadcast()
-	return nil
-}
-
-var errMemPipeClosed = &memPipeError{}
-
-type memPipeError struct{}
-
-func (*memPipeError) Error() string { return "use of closed memPipe" }
-
-// memPipe is an io.ReadWriter end of an in-memory pipe pair.
-type memPipe struct {
-	in  *memPipeBuf // this end reads from in
-	out *memPipeBuf // this end writes to out (the peer reads from it)
-}
-
-func (p *memPipe) Read(b []byte) (int, error)  { return p.in.Read(b) }
-func (p *memPipe) Write(b []byte) (int, error) { return p.out.Write(b) }
-func (p *memPipe) Close() error {
-	if err := p.in.Close(); err != nil {
-		return err
-	}
-	return p.out.Close()
-}
-
-// memPipePair returns two connected ends: writes on a are readable from b
-// and vice versa.
-func memPipePair() (a, b *memPipe) {
-	a2b, b2a := newMemPipeBuf(), newMemPipeBuf()
-	return &memPipe{in: b2a, out: a2b}, &memPipe{in: a2b, out: b2a}
-}
-
 // startTestServer runs s.HandleConnection on the server end of a fresh
-// pipe pair and returns the client-facing end.  The done channel
+// [BufPipe] and returns the client-facing end.  The done channel
 // receives the server's result (or is drained at test end).
-func startTestServer(t *testing.T, s *Server) (client *memPipe, done <-chan error) {
+func startTestServer(t *testing.T, s *Server) (client io.ReadWriteCloser, done <-chan error) {
 	t.Helper()
-	serverEnd, clientEnd := memPipePair()
+	serverEnd, clientEnd := BufPipe()
 	doneCh := make(chan error, 1)
 	go func() {
 		defer serverEnd.Close()

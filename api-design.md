@@ -14,6 +14,7 @@ rsyncfs/                   -- root package: Client, Server, FS integration
   server-handshake.go      -- HandleConnection(), handshake logic
   server-send.go           -- Daemon sender: file list, data transfer
   server-recv.go           -- Daemon receiver: accept pushed files (future)
+  pipe.go                  -- BufPipe(), bounded in-memory pipe for in-process wiring / tests
 
 protocol/                  -- low-level wire protocol (independently reusable)
   greet.go                 -- Greeting type, ParseGreeting, Negotiate
@@ -895,7 +896,7 @@ The wire protocol details (varint encoding, compressed NDX, checksum algorithms,
 
 ### Why `HandleConnection` takes `io.ReadWriter`, not `net.Conn`
 
-The caller controls transport.  Tests use `io.Pipe()` or `net.Pipe()`.  Production uses TCP.  SSH integration wraps an `ssh.Session`'s combined stdin/stdout.  No transport logic leaks into the library.
+The caller controls transport.  Tests use `rsyncfs.BufPipe()`, a bounded in-memory pipe, rather than `net.Pipe()` or `io.Pipe()` -- the latter two are zero-capacity (a write blocks until the peer reads), which deadlocks the rsync handshake where both sides write their greeting before reading the peer's.  A real transport (TCP, Unix socket, etc) provides the needed buffer capacity via its kernel buffer; `BufPipe` provides it in-process.  Production uses TCP.  SSH integration wraps an `ssh.Session`'s combined stdin/stdout.  No transport logic leaks into the library.
 
 ### Why auth is callback-based, not built-in
 

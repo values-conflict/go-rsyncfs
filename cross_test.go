@@ -75,7 +75,7 @@ func crossServer(t *testing.T, fsys fs.FS) *Server {
 }
 
 // crossClient returns a module-mode Client whose ConnectFunc wires every
-// connection to a fresh memPipe pair against s, with a server-side goroutine
+// connection to a fresh [BufPipe] against s, with a server-side goroutine
 // per connection. It also returns the channel those goroutines report on
 // and a pointer counting how many connections were opened.
 //
@@ -89,7 +89,7 @@ func crossClient(t *testing.T, s *Server) (*Client, <-chan error, *int) {
 		Module: crossModuleName,
 		ConnectFunc: func(moduleName string) (io.ReadWriter, error) {
 			connects++
-			serverEnd, clientEnd := memPipePair()
+			serverEnd, clientEnd := BufPipe()
 			go func() {
 				defer serverEnd.Close()
 				doneChs <- s.HandleConnection(serverEnd)

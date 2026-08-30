@@ -28,7 +28,7 @@ The library accepts a single `io.ReadWriter` (or similar stream interface -- TBD
 
 - The "listen" loop for `Server` lives *outside* the library entirely; callers pass in one connection/stream at a time via a clean method call
 - `Client` operations similarly receive a stream from the caller rather than opening sockets themselves
-- This design makes testing trivial (pipe Client directly to Server via `net.Pipe()` without any network stack) and SSH integration straightforward (just wrap an `ssh.Session`'s stdin/stdout)
+- This design makes testing trivial (pipe Client directly to Server via `rsyncfs.BufPipe()`, a bounded in-memory pipe, without any network stack -- `net.Pipe`/`io.Pipe` deadlock on the handshake, which is why the buffered variant exists) and SSH integration straightforward (just wrap an `ssh.Session`'s stdin/stdout)
 
 ### Reusable Instances
 

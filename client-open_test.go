@@ -29,7 +29,7 @@ func drainServer(t *testing.T, done <-chan error) {
 
 // openModuleFile connects to a module served by s and reads the whole file
 // at path, returning its content.
-func openModuleFile(t *testing.T, s *Server, mod, path string) ([]byte, *Session, *memPipe, <-chan error) {
+func openModuleFile(t *testing.T, s *Server, mod, path string) ([]byte, *Session, io.ReadWriteCloser, <-chan error) {
 	t.Helper()
 	client, done := startTestServer(t, s)
 	c := Client{Module: mod}
@@ -353,7 +353,7 @@ func TestOpen_Symlink(t *testing.T) {
 	c := Client{
 		Module: "testmod",
 		ConnectFunc: func(moduleName string) (io.ReadWriter, error) {
-			serverEnd, clientEnd := memPipePair()
+			serverEnd, clientEnd := BufPipe()
 			go func() {
 				defer serverEnd.Close()
 				doneChs <- s.HandleConnection(serverEnd)
@@ -418,7 +418,7 @@ func TestOpen_MultiFileOverConnectFunc(t *testing.T) {
 	c := Client{
 		Module: "testmod",
 		ConnectFunc: func(moduleName string) (io.ReadWriter, error) {
-			serverEnd, clientEnd := memPipePair()
+			serverEnd, clientEnd := BufPipe()
 			go func() {
 				defer serverEnd.Close()
 				doneChs <- s.HandleConnection(serverEnd)
@@ -476,7 +476,7 @@ func TestOpenRoot_List(t *testing.T) {
 	}
 	c := Client{
 		ConnectFunc: func(moduleName string) (io.ReadWriter, error) {
-			serverEnd, clientEnd := memPipePair()
+			serverEnd, clientEnd := BufPipe()
 			go func() {
 				defer serverEnd.Close()
 				_ = s.HandleConnection(serverEnd)
@@ -523,7 +523,7 @@ func TestOpenRoot_ModuleFile(t *testing.T) {
 	}
 	c := Client{
 		ConnectFunc: func(moduleName string) (io.ReadWriter, error) {
-			serverEnd, clientEnd := memPipePair()
+			serverEnd, clientEnd := BufPipe()
 			go func() {
 				defer serverEnd.Close()
 				_ = s.HandleConnection(serverEnd)
@@ -561,7 +561,7 @@ func TestOpenRoot_ModuleDir(t *testing.T) {
 	}
 	c := Client{
 		ConnectFunc: func(moduleName string) (io.ReadWriter, error) {
-			serverEnd, clientEnd := memPipePair()
+			serverEnd, clientEnd := BufPipe()
 			go func() {
 				defer serverEnd.Close()
 				_ = s.HandleConnection(serverEnd)

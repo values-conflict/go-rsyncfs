@@ -384,11 +384,11 @@ func TestHandleConnection_AlgorithmNegotiation(t *testing.T) {
 		t.Fatalf("NewServer: %v", err)
 	}
 
-	serverRW, clientRW := bidirectionalPipe()
+	serverRW, clientRW := net.Pipe()
 
 	done := make(chan error, 1)
 	go func() {
-		defer serverRW.close()
+		defer serverRW.Close()
 		done <- s.HandleConnection(serverRW)
 	}()
 
@@ -437,7 +437,7 @@ func TestHandleConnection_AlgorithmNegotiation(t *testing.T) {
 	}
 	t.Logf("checksum seed: 0x%x", seedBuf)
 
-	clientRW.close()
+	clientRW.Close()
 
 	select {
 	case <-done:
@@ -445,29 +445,6 @@ func TestHandleConnection_AlgorithmNegotiation(t *testing.T) {
 		t.Fatal("server goroutine did not exit")
 	}
 }
-
-// rwCloser is an io.ReadWriter that can be closed.
-type rwCloser interface {
-	io.ReadWriter
-	close() error
-}
-
-// bidirectionalPipe creates two connected rwClosers using io.Pipe.
-func bidirectionalPipe() (server, client rwCloser) {
-	c2sR, c2sW := io.Pipe() // client→server
-	s2cR, s2cW := io.Pipe() // server→client
-
-	return &pipeRW{r: s2cR, w: c2sW}, &pipeRW{r: c2sR, w: s2cW}
-}
-
-type pipeRW struct {
-	r *io.PipeReader
-	w *io.PipeWriter
-}
-
-func (p *pipeRW) Read(data []byte) (int, error)  { return p.r.Read(data) }
-func (p *pipeRW) Write(data []byte) (int, error) { return p.w.Write(data) }
-func (p *pipeRW) close() error                   { p.r.Close(); p.w.Close(); return nil }
 
 func TestHandleConnection_OldProtocol(t *testing.T) {
 	mod := &ServerModule{Name: "testmod", FS: fstest.MapFS{}}

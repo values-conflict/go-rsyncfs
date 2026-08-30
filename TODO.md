@@ -7,6 +7,4 @@
 
 - can we somehow get creative with the `net.Pipe` usage / tests to avoid the goroutines entirely?
 
-- when we're not using mux (old protocol, etc) do we still have a buffer like upstream does?
-
 - are any of our tests slow enough to be worth the overhead that `t.Parallel()` adds?  are they safe/ready for that?
