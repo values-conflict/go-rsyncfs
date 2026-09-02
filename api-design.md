@@ -106,14 +106,18 @@ type Reader struct{}
 func NewReader(r io.Reader) *Reader
 
 // Read from the transparent buffer.  Fetches more MSG_DATA frames as needed.
-// Returns an error (not io.EOF) when a non-DATA message arrives, so the
-// caller can switch to RecvMsg().
+// Interleaved logging / no-op control frames (MSG_INFO, MSG_ERROR,
+// MSG_WARNING, MSG_NOOP, and the generator log codes) are consumed and
+// dropped -- a peer may send them at any point and they must not interrupt
+// the data stream.  Any other non-DATA message returns an error (not
+// io.EOF), so the caller can switch to RecvMsg().
 func (r *Reader) Read(p []byte) (n int, err error)
 
 // RecvMsg reads a non-DATA message, skipping any pending MSG_DATA data.
 func (r *Reader) RecvMsg() (code uint8, payload []byte, err error)
 
-// ReadDataChunk reads the next MSG_DATA frame payload as a single chunk.
+// ReadDataChunk reads the next MSG_DATA frame payload as a single chunk,
+// dropping any interleaved logging / no-op control frames as Read() does.
 // Useful for bounded reads (file lists) where the caller needs the frame boundary.
 func (r *Reader) ReadDataChunk() ([]byte, error)
 ```

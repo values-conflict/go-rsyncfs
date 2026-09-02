@@ -552,7 +552,8 @@ func (st *transferState) sendFile(entry fileEntry, sel *protocol.Selector, outNd
 }
 
 // receiveSums reads the generator's sum head and, when count > 0, the
-// per-block checksums (upstream receive_sums).
+// per-block checksums (upstream receive_sums).  The head's field values are
+// already validated by protocol.ReadSumHead's read_sum_head guards.
 func (st *transferState) receiveSums() (protocol.SumHead, []blockSum, error) {
 	sh, err := protocol.ReadSumHead(st.in, st.ver)
 	if err != nil {
@@ -566,9 +567,6 @@ func (st *transferState) receiveSums() (protocol.SumHead, []blockSum, error) {
 		// proto < 27 carries no s2length; the digest length is the
 		// negotiated algorithm's (md4/md5 are both 16)
 		s2len = 16
-	}
-	if sh.BLength <= 0 {
-		return protocol.SumHead{}, nil, fmt.Errorf("sum head with count %d and block length %d", sh.Count, sh.BLength)
 	}
 	sums := make([]blockSum, sh.Count)
 	for i := range sums {

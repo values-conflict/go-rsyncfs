@@ -3,7 +3,9 @@ package protocol
 import (
 	"crypto/md5"
 	"encoding/binary"
+	"fmt"
 	"io"
+	"math"
 
 	"golang.org/x/crypto/md4"
 )
@@ -142,9 +144,22 @@ func WriteSumHead(w io.Writer, sh SumHead, version int) error {
 	return err
 }
 
-// ReadSumHead reads a SumHead from r in wire format.
+// maxBlockLength is the peer-supplied block length cap (upstream rsync.h): OLD_MAX_BLOCK_SIZE below proto 30, MAX_BLOCK_SIZE from there on.
+func maxBlockLength(version int) int32 {
+	if version >= 30 {
+		return 1 << 17
+	}
+	return 1 << 29
+}
+
+// MaxStrongHashLength is the longest digest length this library supports (md4 and md5 are both 16 bytes), used to bound a peer-supplied s2length.
+const MaxStrongHashLength = 16
+
+// ReadSumHead reads a SumHead from r in wire format, rejecting out-of-range values the way upstream read_sum_head does before any of them are used (a malicious peer's sum struct must fail the connection with a clean error, not corrupt a downstream allocation or hash search).
+//
 // For proto >= 27, reads all four fields (16 bytes).
 // For proto < 27, reads count, blength, remainder (12 bytes); s2length is set to 0.
+//
 // Source: .upstream/io.c:2195-2253, `void read_sum_head(int f, struct sum_struct *sum)`.
 func ReadSumHead(r io.Reader, version int) (SumHead, error) {
 	var b [16]byte
@@ -164,6 +179,26 @@ func ReadSumHead(r io.Reader, version int) (SumHead, error) {
 	if version >= 27 {
 		sh.S2Length = int32(binary.LittleEndian.Uint32(b[8:12]))
 		sh.Remainder = int32(binary.LittleEndian.Uint32(b[12:16]))
+	}
+
+	// upstream read_sum_head's validation guards, in wire order
+	if sh.Count < 0 {
+		return SumHead{}, fmt.Errorf("invalid checksum count %d", sh.Count)
+	}
+	if sh.BLength < 0 || sh.BLength > maxBlockLength(version) {
+		return SumHead{}, fmt.Errorf("invalid block length %d", sh.BLength)
+	}
+	if sh.Count > 0 && sh.BLength == 0 {
+		return SumHead{}, fmt.Errorf("invalid zero block length")
+	}
+	// the blocks describe the file's contents, and a file length is a
+	// varlong30 (int32) -- count*blength past that would overflow any
+	// downstream arithmetic on the product
+	if sh.BLength > 0 && sh.Count > math.MaxInt32/sh.BLength {
+		return SumHead{}, fmt.Errorf("invalid checksum count %d (count*block length exceeds a file length)", sh.Count)
+	}
+	if version >= 27 && (sh.S2Length < 0 || sh.S2Length > MaxStrongHashLength) {
+		return SumHead{}, fmt.Errorf("invalid checksum length %d", sh.S2Length)
 	}
 
 	return sh, nil

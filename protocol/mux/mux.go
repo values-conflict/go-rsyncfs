@@ -184,13 +184,23 @@ func (r *Reader) ReadDataChunk() ([]byte, error) {
 		r.buf.Reset()
 	}
 
-	// Read the next frame
-	code, payload, err := r.readFrame()
-	if err != nil {
-		return nil, err
-	}
-	if code != MsgData {
-		return nil, fmt.Errorf("expected MSG_DATA, got code %d", code)
+	// Read the next MSG_DATA frame, dropping any interleaved logging /
+	// no-op frames (see Read) -- from the application's point of view
+	// they are invisible
+	var code uint8
+	var payload []byte
+	var err error
+	for {
+		code, payload, err = r.readFrame()
+		if err != nil {
+			return nil, err
+		}
+		if code == MsgData {
+			break
+		}
+		if !isInfoMessage(code) {
+			return nil, fmt.Errorf("expected MSG_DATA, got code %d", code)
+		}
 	}
 
 	if len(combined) > 0 {
@@ -202,6 +212,7 @@ func (r *Reader) ReadDataChunk() ([]byte, error) {
 
 // Read from the transparent buffer.  Fetches more MSG_DATA frames as needed.
 // This matches upstream's read_buf() behavior -- the caller never sees mux headers.
+// Peer logging and no-op control frames interleaved with the data (MSG_INFO and siblings) are skipped the way upstream's read_a_msg() forwards them to the log inline; any other non-DATA message still returns an error so the caller can use RecvMsg.
 // Returns io.EOF only when the underlying reader returns EOF with no buffered data.
 func (r *Reader) Read(p []byte) (n int, err error) {
 	// Return buffered data first
@@ -216,6 +227,11 @@ func (r *Reader) Read(p []byte) (n int, err error) {
 			return 0, err
 		}
 		if code != MsgData {
+			if isInfoMessage(code) {
+				// peer logging / no-op frame -- dropped (there is no log
+				// channel in this library to forward it to)
+				continue
+			}
 			// Non-DATA message -- return error so caller can use RecvMsg
 			return 0, &unexpectedMsgError{code: code}
 		}
@@ -268,6 +284,15 @@ func (r *Reader) readFrame() (code uint8, payload []byte, err error) {
 		}
 	}
 	return code, payload, nil
+}
+
+// isInfoMessage reports whether the peer's control frame is one of the logging / no-op messages that upstream's read_a_msg() forwards to the log (or ignores) inline, without interrupting the data stream -- a peer may send them at any point on a multiplexed channel (legitimate or otherwise), so a data reader must not treat them as protocol errors.
+func isInfoMessage(code uint8) bool {
+	switch code {
+	case MsgInfo, MsgError, MsgWarning, MsgErrorSocket, MsgLog, MsgClient, MsgErrorUTF8, MsgNoop:
+		return true
+	}
+	return false
 }
 
 // unexpectedMsgError is returned by Read() when a non-DATA message arrives.

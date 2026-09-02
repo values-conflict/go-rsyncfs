@@ -458,13 +458,13 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 **Binary discovery:** Use the `.upstream/rsync` build when present, else a `rsync` on `PATH`, plus every `rsync_*` binary in `.upstream/old_versions/`; skip any not found.
 
-### Task 21 -- Ported upstream security & edge-case tests
+### ~~Task 21 -- Ported upstream security & edge-case tests~~
 
 **Goal:** Port select upstream regression tests that exercise protocol-level security fixes, malformed-input handling, and wire-format edge cases.  Each test is a self-contained Go test that reproduces the upstream scenario using our own `protocol/` and `Server` types -- no Python harness, no external binaries.
 
-**Files:** `upstream-..._test.go` (one per ported test)
+**Files:** `upstream-..._test.go` (one per upstream test, ported or skipped), `upstream-ports-helpers_test.go` (shared timeout watchdog)
 
-**Naming:** `upstream-<upstream-test-name>_test.go` (e.g., `upstream-proto-hlink-gnum_test.go`).  The filename must round-trip to the upstream test via `sed 's/^upstream-//;s/_test\.go$//'`.
+**Naming:** `upstream-<upstream-test-name>_test.go` (e.g., `upstream-proto-hlink-gnum_test.go`).  The filename must round-trip to the upstream test via `sed 's/^upstream-//;s/_test\.go$//'`.  Skipped tests keep a stub file under the same name whose comment block explains the upstream test and why it does not port.
 
 **Structure per test:** Each file opens with a prose comment block (not code) that answers:
 - Which upstream test this ports (filename + commit or version if relevant)
@@ -473,28 +473,25 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 **Selection criteria:** Port tests that verify our server rejects malformed wire data gracefully.  Skip tests that only exercise C-specific behavior (ASan redzones, assert() placement, pool_alloc internals) unless the underlying protocol rule is implementation-independent.
 
-**Tests to port (high-priority):**
+**Ported tests:**
 
-- `proto-hlink-gnum_test.py` -- undeclared back-reference hard-link gnum must be rejected with a protocol error, not panic/crash.  Tests that `recv_file_entry` validates hlink_ndx bounds.
-- `proto-parent-ndx-empty-dirflist_test.py` -- first inc_recurse flist with "." as a regular file (not directory) must not cause invalid access.  Tests that parent_ndx is validated against dir_flist contents.
-- `proto-hlink-flag-oob_test.py` -- XMIT_HLINKED set without -H flag must be ignored, not cause out-of-bounds write.  Tests that flag validation gates hard-link processing.
-- `checksum-zero-blocklen_test.py` -- sum_head with count>0 and blength=0 must be rejected.  Tests that the receiver validates block length before use.
-- `xattr-wire-cap_test.py` -- oversized xattr datum_len in file list must be rejected before reading the value.  Tests wire-length bounds checking.
-- `proto-sender-selftest_test.py` -- sender self-test mechanism (if applicable to our implementation).  Tests protocol-level self-verification.
-- `proto-cleared-dirflist_test.py` -- cleared dir_flist must not cause invalid access.  Tests flist lifecycle safety.
-- `proto-cleared-ndx_test.py` -- cleared NDX state must not cause invalid access.  Tests NDX validation.
+- `proto-hlink-gnum_test.py` -- out-of-range hard-link references must be rejected with a protocol error, not panic/crash.  `protocol.FlistReader` bounds the hlink back-reference against the flist's span ("hard-link reference out of range") and refuses references before the flist's ndx start (the flat-list form of match_gnums's "gnum precedes flist start" refusal); a boundary table pins the edge both directions.
+- `proto-parent-ndx-empty-dirflist_test.py` -- a "." entry carrying a non-directory mode must be rejected ("rejecting non-directory transfer-root entry").  Driven as a hand-written proto-27 malicious daemon against our Client, whose FlistReader is the recv_file_entry equivalent; the transfer-root guard is the first of upstream's three defense layers.
+- `proto-hlink-flag-oob_test.py` -- XMIT_HLINKED without hard-link preservation must be *ignored*, not honored and not fatal: the full-entry layout a non-`-H` daemon would emit still parses and the stream stays in sync (the C out-of-bounds write is an ASan redzone oracle and does not port).
+- `checksum-zero-blocklen_test.py` -- sum_head with count>0 and blength=0 must be rejected ("invalid zero block length").  A full proto-27 connection drives a malicious client at our Server's selector loop (upstream's direction is flipped, since we have no client-side sender; the guard sits in the ported read_sum_head, `protocol.ReadSumHead`), plus a table test pinning every read_sum_head guard at the byte level.
+- `proto-sender-selftest_test.py` -- the sender-side self-test becomes the FlistWriter → FlistReader round-trip: well-formed lists parse back with no error across protocol versions, and a hand-crafted XMIT_LONG_NAME + absurd varint name length trips the ported overflow guard (upstream aborts the process; the reader returns a clean error).
+- `proto-msg-info-assert_test.py` -- a peer MSG_INFO frame arriving mid-protocol (the upstream test's marker payload) is ignored by the server's mux reader instead of tripping an assert, and the transfer around it completes byte-intact with the server still reusable.
 
-**Tests to port (medium-priority, if time):**
+**Skipped ports** (stub file per name, rationale in the file):
 
-- `malicious-dot-dir-delete-scope_test.py` -- malicious sender must not enlarge --delete scope via synthetic "." entry.  Tests delete confinement.
-- `malicious-dot-file-delete-scope_test.py` -- same as above but for file entries.
-- `proto-msg-info-assert_test.py` -- MSG_INFO handling must not trigger assert.  Tests message dispatch safety.
-- `proto-subflist-freed_test.py` -- sub-flist after free must be refused.  Tests flist lifecycle.
-- `readonly-partial-abort-mode-regression_test.py` -- readonly + partial abort interaction.  Tests mode flag consistency.
+- `xattr-wire-cap_test.py` -- xattr blocks are not part of this library's wire surface (an explicit post-v1 phase); there is no datum length to bound-check
+- `malicious-dot-dir-delete-scope_test.py`, `malicious-dot-file-delete-scope_test.py` -- the library has no --delete handling, so the delete-scope precondition has no code path to protect
+- `readonly-partial-abort-mode-regression_test.py` -- the behavior under test is receiver-side in-place update with a partial-file cache, neither of which exists
+- `proto-cleared-dirflist_test.py`, `proto-subflist-freed_test.py` -- inc_recurse sub-flist lifecycle (markers, per-flist free points, a pooled dir_flist); the reader handles a single flat file list and the C freed-slot state has no Go counterpart
+- `proto-cleared-ndx_test.py` -- the "cleared slot" is a C pool artifact (clear_file() in place, F_IS_ACTIVE guard); the flat reader has no inactive state for a transfer ndx to target
 
-**Tests to skip (C-specific, not portable):**
+**C-specific, not portable (no test or stub):**
 
-- `proto-hlink-flag-oob_test.py` ASan variant -- the OOB write is a C memory layout issue; port only the protocol-rule test (flag validation), not the memory-corruption oracle
 - Any test that requires `require_asan()` -- ASan redzones are a C build artifact
 - Any test that checks for specific C error messages (e.g., "assert() failed") -- we check behavior, not crash type
 

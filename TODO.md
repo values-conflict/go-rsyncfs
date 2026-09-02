@@ -8,3 +8,5 @@
 - can we somehow get creative with the `net.Pipe` usage / tests to avoid the goroutines entirely?
 
 - are any of our tests slow enough to be worth the overhead that `t.Parallel()` adds?  are they safe/ready for that?
+
+- deal with protocol-level logging somehow -- maybe a "logger" object that gets passed around so that protocol-level logs can go there instead of being dropped?  maybe just a callback?

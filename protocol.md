@@ -1315,6 +1315,16 @@ Upstream uses two separate output paths with circular buffers (32KB default, `IO
 
 **Input:** `iobuf.in` -- transparent byte stream from incoming `MSG_DATA` frames.  Application code calls `read_buf()`/`read_int()`/`read_byte()` which read from this buffer.  When empty, the iobuf layer reads the next `MSG_DATA` frame and refills.  **Application never sees mux headers.**
 
+### 10.4 Message dispatch (`read_a_msg()`)
+
+**Source:** `.upstream/io.c:1655`, `static void read_a_msg(void)`, `.upstream/io.c:1732-1738`, `case MSG_NOOP: ... /* Support protocol-30 keep-alive method. */`, `.upstream/io.c:1819-1846`, `case MSG_ERROR_SOCKET: ... case MSG_LOG: if (!am_generator) goto invalid_msg; ... rwrite((enum logcode)tag, data, msg_bytes, !am_generator);`.
+
+On a multiplexed channel the peer may interleave non-DATA control frames between MSG_DATA frames at any point.  `read_a_msg()` dispatches on the tag:
+
+- **Logging / no-op frames** -- `MSG_ERROR_XFER`, `MSG_INFO`, `MSG_ERROR`, `MSG_WARNING`, and (generator-side only: `!am_generator` → invalid message) `MSG_ERROR_SOCKET`, `MSG_ERROR_UTF8`, `MSG_CLIENT`, `MSG_LOG`: the payload is read (must be < `BIGPATHBUFLEN` or "multiplexing overflow" → `RERR_STREAMIO`) and passed to `rwrite()` for the log; **protocol processing continues**.  The table's direction column is the customary direction; the dispatch itself puts no role check on the four plain log codes, so a frame may arrive from either peer at any point and a data reader must consume and drop it rather than treat it as a protocol error.  `MSG_NOOP`: payload must be exactly 0 bytes; a sender receiving one may answer with its own keep-alive (the protocol-30 keep-alive method).
+- **Protocol frames** -- `MSG_STATS`, `MSG_REDO`, `MSG_IO_ERROR`, `MSG_IO_TIMEOUT`, `MSG_DELETED`, `MSG_SUCCESS`, `MSG_NO_SEND`, `MSG_ERROR_EXIT`: role-specific handling, each with a strict payload-size check (`.upstream/io.c:1689-1815`).
+- **Anything else** -- unknown tag, wrong payload size, or a logging payload of `BIGPATHBUFLEN` or more: "invalid multi-message" / "multiplexing overflow", and the process exits `RERR_STREAMIO` (`.upstream/io.c:1793-1801, 1832-1841`).
+
 ## 11. File list wire format
 
 ### 11.1 Xmit flags encoding

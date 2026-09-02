@@ -1,8 +1,15 @@
 package protocol
 
 import (
+	"fmt"
 	"io"
 )
+
+// MaxPathLen is the longest filename the parser will accept, mirroring
+// upstream MAXPATHLEN (rsync.h).  recv_file_entry's overflow guard rejects
+// a name whose reassembled length would exceed it, so a peer cannot make
+// us allocate a giant name buffer from a crafted length field.
+const MaxPathLen = 4096
 
 // FlistEntry is a parsed file list entry.
 type FlistEntry struct {
@@ -51,6 +58,7 @@ type FlistReader struct {
 	preserveHardlinks bool
 	alwaysChecksum    bool
 	incRecurse        bool
+	used              int // entries read so far; the hlink reference bound
 	lastMode          uint32
 	lastUID           int32
 	lastGID           int32
@@ -144,6 +152,13 @@ func (r *FlistReader) ReadEntry() (*FlistEntry, error) {
 		l2 = int(b)
 	}
 
+	// overflow guard (upstream recv_file_entry): a peer-supplied name
+	// length beyond MAXPATHLEN would otherwise size the suffix buffer to
+	// an absurd allocation (a negative length is just as bad)
+	if l2 < 0 || l1+l2 > MaxPathLen {
+		return nil, fmt.Errorf("overflow: xflags=0x%x l1=%d l2=%d", xflags, l1, l2)
+	}
+
 	suffix := make([]byte, l2)
 	if l2 > 0 {
 		if _, err := io.ReadFull(r.r, suffix); err != nil {
@@ -153,18 +168,34 @@ func (r *FlistReader) ReadEntry() (*FlistEntry, error) {
 	entry.Name = r.lastName[:l1] + string(suffix)
 	r.lastName = entry.Name
 
-	// hard link first_ndx (proto >= 30, XMIT_HLINKED without XMIT_HLINK_FIRST)
-	if r.version >= 30 && (xflags&XmitHlinked != 0) && (xflags&XmitHlinkFirst == 0) {
+	// hard link first_ndx (proto >= 30, XMIT_HLINKED without XMIT_HLINK_FIRST) --
+	// gated on preserveHardlinks the way upstream gates FLAG_HLINKED:
+	// the abbreviated form (name + first_hlink_ndx only) changes the
+	// entry's field layout, so honoring a peer's hlink flag when hard
+	// links are not preserved would desync the whole stream
+	if r.version >= 30 && r.preserveHardlinks && (xflags&XmitHlinked != 0) && (xflags&XmitHlinkFirst == 0) {
 		ndx, err := ReadVarint(r.r)
 		if err != nil {
 			return nil, err
 		}
-		entry.HlinkNdx = ndx
-		if ndx >= 0 {
-			// abbreviated entry -- copy from first_hlink
-			// for now, just record the ndx; caller resolves
-			return entry, nil
+		// recv_file_entry's bounds check: the reference must fit within
+		// this flist's span (a flat reader sees one list starting at
+		// ndx_start = 1, so the span is 0 .. used+1 exclusive)
+		if ndx < 0 || ndx >= int32(r.used+1) {
+			return nil, fmt.Errorf("hard-link reference out of range: %d (%d)", ndx, r.used+1)
 		}
+		// match_gnums's guard, collapsed to the flat case: a reference
+		// below the flist's start (ndx_start = 1) is a back-reference to
+		// an earlier flist's declared first-hlink, and a flat reader has
+		// no earlier flist in which it could have been declared
+		if ndx < 1 {
+			return nil, fmt.Errorf("hard-link gnum %d precedes flist start 1", ndx)
+		}
+		entry.HlinkNdx = ndx
+		r.used++
+		// abbreviated entry -- copy from first_hlink
+		// for now, just record the ndx; caller resolves
+		return entry, nil
 	}
 
 	// file size: longint below proto 30, varlong30 from there on
@@ -214,6 +245,26 @@ func (r *FlistReader) ReadEntry() (*FlistEntry, error) {
 		r.lastMode = v
 	} else {
 		entry.Mode = r.lastMode
+	}
+
+	// mode type validation (upstream recv_file_entry): reject type bits
+	// that are not one of the standard file types, so garbage modes
+	// cannot propagate into the file-type checks below unpredictably
+	// (mode 0 is the --delete-missing-args placeholder, which we never
+	// generate but still accept as inert)
+	if entry.Mode != 0 {
+		switch entry.Mode & 0o170000 {
+		case 0o100000, 0o040000, 0o120000, 0o020000, 0o060000, 0o010000, 0o140000:
+		default:
+			return nil, fmt.Errorf("invalid file mode %#o for %s", entry.Mode, entry.Name)
+		}
+	}
+
+	// transfer-root guard (upstream recv_file_entry): "." is the
+	// synthetic transfer root, and reinterpreting it as a file lets
+	// downstream code index a directory slot that was never filled
+	if (entry.Name == "." || entry.Name == "/.") && (entry.Mode&0o170000) != 0o040000 {
+		return nil, fmt.Errorf("rejecting non-directory transfer-root entry: %s", entry.Name)
 	}
 
 	// directory classification (upstream sets these flags only for
@@ -387,8 +438,12 @@ func (r *FlistReader) ReadEntry() (*FlistEntry, error) {
 	// exists in the >= 3.1 daemons' outgoing stream; the 2.6.x peers
 	// that negotiate sub-30 protocols read it raw).
 	isReg := (entry.Mode & 0o170000) == 0o100000
-	readHlink := r.version < 30 &&
-		((r.version < 28 && r.preserveHardlinks && isReg) ||
+	// gated on preserveHardlinks the way upstream gates FLAG_HLINKED:
+	// the peer's XMIT_HLINKED flag without -H on our side is ignored, so
+	// the dev/ino pair it would carry is never read and the stream stays
+	// in sync
+	readHlink := r.version < 30 && r.preserveHardlinks &&
+		((r.version < 28 && isReg) ||
 			(r.version >= 28 && xflags&XmitHlinked != 0))
 	if readHlink {
 		if r.version < 26 {
@@ -426,6 +481,7 @@ func (r *FlistReader) ReadEntry() (*FlistEntry, error) {
 		entry.Checksum = csum
 	}
 
+	r.used++
 	return entry, nil
 }
 
