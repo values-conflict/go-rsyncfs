@@ -403,7 +403,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 - Examples are self-contained: start the server, connect the client, verify a file transfer, clean up; the accept loop is shown in `ExampleServer` and a small shared `startExampleServer` test helper (with a "see ExampleServer" comment) keeps the other examples focused on their own side
 - Use `net.Listen`/`net.Dial` for TCP (not `io.Pipe` which is only for unit tests)
 
-## Phase 4: Integration & Polish
+## ~~Phase 4: Integration & Polish~~
 
 ### ~~Task 18 -- Cross-implementation tests~~
 
@@ -505,7 +505,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 **Why this matters:** These tests verify that our Go implementation handles the same malformed-input cases that caused real security bugs in the C rsync.  They are regression tests -- if a future refactor breaks validation, these tests catch it.
 
-### Task 22 -- Protocol version coverage
+### ~~Task 22 -- Protocol version coverage~~
 
 **Goal:** Systematic unit tests across the supported protocol version range (20-32).  Verify negotiation, encoding differences, and feature gates work correctly per version.
 
