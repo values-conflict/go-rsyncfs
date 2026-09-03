@@ -280,7 +280,7 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 ### ~~Task 13 -- Server: HandleConnection~~
 
-**Goal:** Implement the full server-side connection handling: handshake (greeting, module selection, auth, args, compat flags, algorithms, seed), file list transfer, selector loop, data transfer, final goodbye, and stats exchange.
+**Goal:** Implement the full server-side connection handling: handshake (greeting, module selection, auth, args, compat flags, algorithms, seed), file list transfer, selector loop, data transfer, stats exchange, and final goodbye.
 
 **Files:** `server-handshake.go`, `server-handshake_test.go`
 
@@ -292,10 +292,8 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 - Composes `protocol/` primitives into full handshake flow (see api-design.md composition diagram)
 - After handshake: switch to multiplexed I/O for daemon→client channel
 - Send file list, then enter selector loop
-- Selector loop: read selectors from raw connection (buffered), echo via muxWriter, send file data for TRANSFER selectors
-- Final goodbye exchange and stats exchange
-- Handshake timeout (default 60 seconds) on pre-transfer handshake
-- Peer-supplied MSG_IO_ERROR values masked against IOERRValidMask
+- Selector loop: read selectors from raw connection (buffered) or the mux reader (proto ≥ 30), read the generator's sum struct, echo via muxWriter, send file data for TRANSFER selectors
+- Stats exchange, then the final goodbye exchange
 
 **Tests:**
 
@@ -372,8 +370,8 @@ As tasks (and phases) are completed, ~~strikethrough~~ their titles (`### Task N
 
 - Session implements fs.FS (not Client)
 - For directories: read file list from server, parse with protocol.FlistReader, return directory entries
-- For regular files: send selector (ItemTransfer|ItemMissingData), read sum_head + block checksums, write delta stream, read file data, verify checksum, send MSG_SUCCESS
-- Phase exchange: send NDX_DONE after file list, read NDX_DONE from server
+- For regular files: send selector (ItemTransfer|ItemMissingData) plus a null sum head (no local copy), read the echoed selector, the daemon's sum head, and the delta stream, verify the whole-file checksum, and return the data
+- The connection is a single batch session: every Open consumes it (phase exchange NDX_DONE round-trips, stats, final goodbye on the way out) and the next Open re-handshakes via ConnectFunc
 - Root mode: Session acts as config holder; each Open creates fresh connection via ConnectFunc
 - Metadata mapping: rsync wire-format modes to Go os.FileMode
 - Symlinks: return appropriate Mode() flags with target information

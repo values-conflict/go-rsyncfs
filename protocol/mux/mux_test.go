@@ -2,6 +2,7 @@ package mux
 
 import (
 	"bytes"
+	"encoding/binary"
 	"io"
 	"testing"
 )
@@ -91,6 +92,55 @@ func TestReader_SpansMultipleFrames(t *testing.T) {
 	}
 	if string(got) != "hello world" {
 		t.Errorf("got %q, want %q", got, "hello world")
+	}
+}
+
+// writeRawFrame appends one mux frame (header + payload) to buf.
+func writeRawFrame(buf *bytes.Buffer, code uint8, payload []byte) {
+	var hdr [4]byte
+	binary.LittleEndian.PutUint32(hdr[:], uint32(7+code)<<24|uint32(len(payload)))
+	buf.Write(hdr[:])
+	buf.Write(payload)
+}
+
+func TestReader_DropsLogFrames(t *testing.T) {
+	// Every logging / no-op frame upstream's read_a_msg() forwards to the
+	// log must be invisible to Read(): a peer may emit them between
+	// MSG_DATA frames at any point (an rsync daemon emits MSG_ERROR_XFER
+	// per transfer error) and the data stream must continue.
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	w.Write([]byte("a"))
+	w.Flush()
+	writeRawFrame(&buf, MsgErrorXfer, []byte("rsync: error on file\n"))
+	writeRawFrame(&buf, MsgInfo, []byte("info\n"))
+	writeRawFrame(&buf, MsgError, []byte("error\n"))
+	writeRawFrame(&buf, MsgWarning, []byte("warning\n"))
+	writeRawFrame(&buf, MsgErrorSocket, []byte("socket\n"))
+	writeRawFrame(&buf, MsgErrorUTF8, []byte("utf8\n"))
+	writeRawFrame(&buf, MsgClient, []byte("client\n"))
+	writeRawFrame(&buf, MsgLog, []byte("log\n"))
+	writeRawFrame(&buf, MsgNoop, nil)
+	w.Write([]byte("b"))
+	w.Flush()
+
+	r := NewReader(&buf)
+	got := make([]byte, 2)
+	if _, err := io.ReadFull(r, got); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if string(got) != "ab" {
+		t.Errorf("got %q, want %q", got, "ab")
+	}
+
+	// A protocol frame (not a logging frame) must still surface as an
+	// error from Read so the caller can switch to RecvMsg.
+	var buf2 bytes.Buffer
+	writeRawFrame(&buf2, MsgRedo, []byte{0, 0, 0, 1})
+	r2 := NewReader(&buf2)
+	p := make([]byte, 1)
+	if _, err := r2.Read(p); err == nil {
+		t.Error("Read: expected an error for a non-logging non-DATA frame")
 	}
 }
 

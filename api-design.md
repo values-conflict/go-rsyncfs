@@ -106,11 +106,12 @@ type Reader struct{}
 func NewReader(r io.Reader) *Reader
 
 // Read from the transparent buffer.  Fetches more MSG_DATA frames as needed.
-// Interleaved logging / no-op control frames (MSG_INFO, MSG_ERROR,
-// MSG_WARNING, MSG_NOOP, and the generator log codes) are consumed and
-// dropped -- a peer may send them at any point and they must not interrupt
-// the data stream.  Any other non-DATA message returns an error (not
-// io.EOF), so the caller can switch to RecvMsg().
+// Interleaved logging / no-op control frames (the MSG_INFO group --
+// MSG_ERROR_XFER, MSG_INFO, MSG_ERROR, MSG_WARNING, the sibling log codes --
+// and MSG_NOOP) are consumed and dropped -- a peer may send them at any
+// point (an rsync daemon emits MSG_ERROR_XFER per transfer error) and they
+// must not interrupt the data stream.  Any other non-DATA message returns an
+// error (not io.EOF), so the caller can switch to RecvMsg().
 func (r *Reader) Read(p []byte) (n int, err error)
 
 // RecvMsg reads a non-DATA message, skipping any pending MSG_DATA data.
@@ -120,6 +121,10 @@ func (r *Reader) RecvMsg() (code uint8, payload []byte, err error)
 // dropping any interleaved logging / no-op control frames as Read() does.
 // Useful for bounded reads (file lists) where the caller needs the frame boundary.
 func (r *Reader) ReadDataChunk() ([]byte, error)
+
+// ErrPayloadTooLarge is returned by Writer when a single SendMsg payload
+// would not fit in the header's 24-bit length field (max ~16MB per frame).
+var ErrPayloadTooLarge error
 ```
 
 ## `protocol` -- low-level wire protocol
@@ -160,6 +165,8 @@ func WriteInt32(w io.Writer, v int32) error   // 4 bytes LE
 func ReadInt32(r io.Reader) (int32, error)    // 4 bytes LE
 func WriteUint16(w io.Writer, v uint16) error // 2 bytes LE (shortint)
 func ReadUint16(r io.Reader) (uint16, error)  // 2 bytes LE (shortint)
+func WriteUint32(w io.Writer, v uint32) error // 4 bytes LE (mtime on proto < 30 file lists)
+func ReadUint32(r io.Reader) (uint32, error)  // 4 bytes LE
 
 // --- Variable-length integers (protocol >= 30) ---
 
@@ -244,6 +251,7 @@ const (
     XmitTopDir           = 1 << 0
     XmitSameMode         = 1 << 1
     XmitExtendedFlags    = 1 << 2 // proto >= 28 (replaces XmitSameRdevPre28)
+    XmitNoContentDir     = 1 << 8 // proto 30+ dirs (alias of XmitSameRdevMajor's bit)
     XmitSameUID          = 1 << 3
     XmitSameGID          = 1 << 4
     XmitSameName         = 1 << 5
@@ -310,7 +318,11 @@ type SumHead struct {
 }
 
 func WriteSumHead(w io.Writer, sh SumHead, version int) error
-func ReadSumHead(r io.Reader, version int) (SumHead, error)
+func ReadSumHead(r io.Reader, version int) (SumHead, error) // rejects out-of-range values (upstream read_sum_head guards)
+
+// MaxStrongHashLength bounds a peer-supplied s2length (the longest digest
+// this library supports; md4 and md5 are both 16 bytes).
+const MaxStrongHashLength = 16
 
 // Checksum1 computes the rsync rolling checksum (Adler-32-inspired).
 // Returns a 4-byte LE result.
@@ -387,6 +399,10 @@ func WriteDeltaStream(w io.Writer, tokens []DeltaToken) error
 ### File list wire format
 
 ```go
+// MaxPathLen is the longest filename the parser will accept (upstream
+// MAXPATHLEN); a peer-supplied name length past it is an overflow error.
+const MaxPathLen = 4096
+
 // FlistEntry is a parsed file list entry.
 type FlistEntry struct {
     Name       string
@@ -487,6 +503,11 @@ func WriteArgs(w io.Writer, args []string, version int) error
 // in the argument list.  Returns "" if no -e argument is found.
 func ExtractClientInfo(args []string) string
 
+// ExtractPreserveFlags checks the combined short-option argument for 'o'
+// (owner), 'g' (group), and 'H' (hard links) -- the client's preserve
+// settings that the daemon applies to its file list.
+func ExtractPreserveFlags(args []string) (preserveUID, preserveGID, preserveHlinks bool)
+
 // ResolveCompatFlags builds the server's compat flags based on its capabilities
 // and the client's advertised feature flags from clientInfo.
 func ResolveCompatFlags(serverCaps int, clientInfo string) int
@@ -506,8 +527,14 @@ func WriteGreeting(w io.Writer, g Greeting) error
 // ReadModuleRequest reads the module name (#list or actual module).
 func ReadModuleRequest(r io.Reader) (string, error)
 
-// WriteModuleList writes the tab-separated module listing followed by EXIT.
-func WriteModuleList(w io.Writer, modules []ModuleInfo) error
+// WriteModuleRequest writes the module name (#list or actual module) as a
+// newline-terminated line.
+func WriteModuleRequest(w io.Writer, moduleName string) error
+
+// WriteModuleList writes the tab-separated module listing (%-15s\t%s per
+// module).  The @RSYNCD: EXIT terminator follows for proto >= 25 only; below
+// 25 the connection close is the terminator.
+func WriteModuleList(w io.Writer, modules []ModuleInfo, version int) error
 
 type ModuleInfo struct {
     Name    string
@@ -648,7 +675,8 @@ type ServerModule struct {
 //
 // Handles: greeting exchange, module selection (#list or named module),
 // authentication, argument parsing, compat flags, checksum negotiation,
-// file list transfer, selector loop, data transfer, final goodbye.
+// file list transfer, selector loop, data transfer, stats exchange, final
+// goodbye.
 func (s *Server) HandleConnection(rw io.ReadWriter) error
 ```
 
@@ -659,8 +687,7 @@ func (s *Server) HandleConnection(rw io.ReadWriter) error
 - `Server.Greeting` and `ServerModule.AuthCallback` are direct fields, not passed per-call.  This prevents per-connection config mutation and keeps the API surface minimal -- there's no `HandleOptions` struct to wire up on every call.
 - Auth is per-module (via `ServerModule.AuthCallback`), matching rsync's per-module secrets file model.
 - The server's output is multiplexed on every supported protocol version (started in the handshake for proto < 23, in the transfer phase for proto 23 and up); its input (filter list, selectors) is multiplexed for proto >= 30 and raw below.  This I/O mode split is internal to `HandleConnection`.
-- The server enforces a handshake timeout (default 60 seconds) on the pre-transfer handshake (greeting, module selection, auth, argument reading).  This prevents an unauthenticated peer from holding a connection slot open indefinitely.  The timeout is internal and not currently configurable.
-- Peer-supplied `MSG_IO_ERROR` values are masked against `IOERRValidMask` before use, preventing a malicious peer from setting arbitrary undefined bits in the local `io_error`.
+- Peer logging control frames interleaved on the multiplexed input (the MSG_INFO group, see [protocol/mux]) are consumed and dropped by the mux reader, so a daemon that logs a transfer error mid-protocol does not abort the data stream.
 
 ### Client
 
@@ -728,31 +755,24 @@ This keeps `ReadDir` → `Open` isomorphic: the symlink name is openable (follow
 // In root mode, Session is a config holder (no live connection) --
 // each FS operation creates its own connection via ConnectFunc.
 //
+// A regular file open is a complete, self-contained rsync transfer: the
+// connection's file list is read, one selector is sent, the data is pulled
+// and verified, and the session is torn down (phase exchange, stats, final
+// goodbye).  The rsync protocol is a single batch session per connection, so
+// the connection is consumed by the end of every Open; the next Open
+// establishes a fresh one via Client.ConnectFunc.  (A Connect(rw) session
+// without a ConnectFunc supports exactly one Open.)
+//
 // Session is not safe for concurrent use.  The rsync protocol is sequential:
 // selectors are sent one-at-a-time through a single-phase loop, and the
 // compressed NDX encoder maintains shared delta state.  The mux framing layer
 // allows the daemon to interleave control messages with data, but does not
 // provide request/response correlation or concurrent transfer support.
 //
-// For concurrent access (e.g., FUSE), use one of these patterns:
-//
-// Session pool: maintain a pool of Sessions (one per Connect() call) and
-// dispatch operations across them.  Each Session handles its own sequential
-// selector loop independently.  This allows multiple file transfers to
-// proceed in parallel across connections, at the cost of handshake overhead
-// per connection.
-//
-// Cache-backed single session: use a single Session for browsing (file list
-// and directory traversal via inc_recurse), but cache transferred file data
-// locally.  When a file is opened, trigger its transfer into a temp file or
-// page cache, then serve subsequent reads from the cache.  This matches the
-// rsync pull-once model and minimizes connection churn.
-//
-// For FUSE specifically: the kernel issues requests concurrently across
-// worker threads.  Since rsync supports interleaved (but not concurrent)
-// selectors, a single Session can serve readdir A, readdir B, open A/C
-// sequentially.  However, two simultaneous file transfers will serialize.
-// A session pool with per-connection caching is the most practical approach.
+// For concurrent access (e.g., FUSE): the per-operation connection model is
+// built in -- use one Session per client thread (each backed by its own
+// ConnectFunc), and cache transferred file data on the caller's side so
+// repeated opens don't re-pull.
 type Session struct{}
 
 var _ fs.FS = (*Session)(nil)
@@ -769,17 +789,32 @@ func (c Client) OpenRoot() (*Session, error)
 
 // Open implements fs.FS.  Opens the named file or directory within the module.
 // For directories, returns a file implementing ReadDirFile.
-// For regular files, triggers the rsync data transfer protocol.
+// For regular files, runs the full rsync data transfer protocol (the
+// connection is consumed and the next Open reconnects via ConnectFunc).
+// Session also implements fs.ReadLinkFS (Lstat/ReadLink below).
 func (s *Session) Open(name string) (fs.File, error)
+
+// Lstat implements fs.ReadLinkFS: returns the entry's FileInfo without
+// following symlinks (a full file-list operation).
+func (s *Session) Lstat(name string) (fs.FileInfo, error)
+
+// ReadLink implements fs.ReadLinkFS: returns the symlink's target (a full
+// file-list operation).
+func (s *Session) ReadLink(name string) (string, error)
+
+// BufPipe returns two connected, in-memory io.ReadWriteCloser ends, each
+// backed by a bounded 32KB buffer.  Unlike net.Pipe or io.Pipe (zero
+// capacity: a write blocks until the peer reads), each direction buffers,
+// so the rsync handshake -- which has both sides write before reading --
+// completes in-process.  Use for wiring Client to Server without a network.
+func BufPipe() (a, b io.ReadWriteCloser)
 ```
 
 **Design notes for Session:**
 
-- `Session` implements `fs.FS` (not `Client`).  The `Client` is immutable config; `Session` holds the live connection state.
-- In root mode, `Session` holds no connection -- it delegates to `ConnectFunc` per operation.
-- `Open` on a directory reads the file list from the server and returns directory entries.
-- `Open` on a regular file sends a selector and reads the data through the delta transfer protocol.
-- `Session` is not safe for concurrent use (the connection state is shared).  See the Session godoc for patterns (session pool, cache-backed single session).
+- `Session` implements `fs.FS` and `fs.ReadLinkFS` (not `Client`).  The `Client` is immutable config; `Session` holds the live connection state.
+- Every `Open` is a self-contained session: it reads the file list, serves the entry (directory entries, symlink target, or a full file transfer with checksum verification), and then runs the phase exchange, stats, and final goodbye on the way out.  The connection is consumed, and the next operation re-handshakes via `ConnectFunc`.
+- In root mode, `Session` holds no connection -- it delegates to `ConnectFunc` per operation (a fresh `#list` connection for the root, a fresh module connection per module open).
 - `io.ReaderAt` is intentionally **not** implemented on files returned by `Open`.  The rsync protocol has no random-access primitive -- a selector triggers a full sequential transfer.  Supporting `ReadAt` would require buffering the entire file in memory or on disk, which is a caching concern that belongs in the caller's cache layer, not the protocol library.
 
 ### Future: writability (push operations)
@@ -816,7 +851,7 @@ The root `rsyncfs/` package composes `protocol/` primitives into the full handsh
 3. protocol.ReadGreeting(rw)  -> clientGreeting
 4. protocol.Negotiate(clientGreeting, s.Greeting) -> version, subProto, digest
 5. protocol.ReadModuleRequest(rw) -> moduleName (#list or actual)
-   if #list: protocol.WriteModuleList(rw, modules); return
+   if #list: protocol.WriteModuleList(rw, modules, version); return
 6. if module.AuthCallback != nil: protocol.WriteAuthChallenge(rw, challenge)
                                   protocol.ReadAuthResponse(rw) -> username, responseHash
                                   verify via module.AuthCallback
@@ -838,12 +873,13 @@ The root `rsyncfs/` package composes `protocol/` primitives into the full handsh
     for each phase:
         read selectors via muxReader (proto >= 30) or raw connection (proto < 30)
         for each selector with ItemTransfer:
-            echo selector via muxWriter
-            sendFile(muxReader, muxWriter, file, version, seed)
+            read the generator's sum struct (sum head + block checksums)
+            echo selector + sum head via muxWriter
+            sendFile(muxWriter, file, version, seed)  -- delta stream + whole-file checksum
         read NDX_DONE the same way
         echo NDX_DONE via muxWriter
-14. <- final goodbye exchange
-15. <- stats exchange
+14. <- stats exchange (daemon -> client: 3 longints/varlong30 always, 5 from proto 29)
+15. <- final goodbye exchange (generator NDX_DONE; echo + second NDX_DONE from proto 31)
 ```
 
 And for `Client.Connect` + `Session.Open`:
@@ -872,20 +908,29 @@ Connect():
 14. return Session
 
 Session.Open(name):
-1. readFileList() -- read from muxReader, parse with protocol.FlistReader
-2. phaseExchange() -- send NDX_DONE via out (mux for proto >= 30, raw below),
-   read NDX_DONE from muxReader
+1. acquireLive() -- the live connection, or a fresh one via ConnectFunc
+   (the previous operation consumed it)
+2. readFileList() -- read from muxReader, parse with protocol.FlistReader,
+   consume the uid/gid id lists (+ proto < 30 int32 io_error trailer); the
+   entry's NDX is its position in the daemon's f_name_cmp sort order
 3. find target entry by name
 4. if directory: return directory entries from file list
+   if symlink: return the entry carrying its target (fs.ReadLinkFS)
 5. if regular file:
    a. writeSelector(ndx, ItemTransfer|ItemMissingData) via out (mux for
-      proto >= 30, raw below)
-   b. read sum_head from muxReader
-   c. read block checksums from muxReader
-   d. read delta stream from muxReader (match tokens / literal data)
-   e. read file checksum from muxReader (verify)
-   f. send MSG_SUCCESS with ndx via muxWriter (proto >= 30)
-   g. return file with data
+      proto >= 30, raw below), then a null sum head (count 0: no local copy,
+      so the whole file comes back as literals)
+   b. read the echoed selector from muxReader (separate NDX state from the
+      one that sent it)
+   c. read the daemon's sum_head from muxReader
+   d. read the delta stream from muxReader (literal chunks; match tokens
+      only when block checksums were supplied)
+   e. read the whole-file checksum from muxReader (verify)
+   f. return the file with data
+6. finishSession() -- the NDX_DONE phase exchange (one write+echo per phase
+   boundary, compressed NDX from proto 30 / int32 below), the stats
+   (client <- daemon), and the final goodbye (proto 31: echo + second
+   NDX_DONE); the connection is then closed and the next Open reconnects
 ```
 
 ## Key design decisions

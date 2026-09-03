@@ -486,7 +486,7 @@ Source: `.upstream/main.c:1200-1205`, `} ... io_start_buffering_in(f_in);`.
 | Input mode (daemon) | Buffered (raw bytes) for proto < 30; **multiplexed** for proto ≥ 30 |
 | Wire format | Generator-side `write_ndx()` produces compressed NDX, `write_shortint()` 2-byte LE; the bytes are raw for proto < 30 and wrapped in MSG_DATA frames for proto ≥ 30 |
 | Proto gate | All versions (framing gate: proto ≥ 30) |
-| Data | Selectors (NDX + iflags + optional attrs), NDX_DONE |
+| Data | Selectors (NDX + iflags + optional attrs), the receiver's sum struct (sum head + block checksums, sent by the generator), NDX_DONE |
 
 **Source:** Generator output: `io_start_multiplex_out(f_out)` at `.upstream/main.c:1357` (proto ≥ 30, before the fork; the generator inherits it), `io_start_buffering_out(f_out)` at `.upstream/main.c:1138` (after the fork, every version -- buffer allocation only, does not clear the multiplex flag).  Daemon input: `io_start_multiplex_in(f_in)` at `.upstream/main.c:1311` (proto ≥ 30), `io_start_buffering_in(f_in)` at `.upstream/main.c:1313` (proto < 30) and `.upstream/main.c:991` (`do_server_sender()`, buffer allocation only).  The filter list is read in the same mode as the selectors.
 
@@ -499,7 +499,7 @@ Source: `.upstream/main.c:1200-1205`, `} ... io_start_buffering_in(f_in);`.
 | Input mode (receiver) | Multiplexed (MSG_DATA frames) |
 | Wire format | MSG_DATA frames wrapping raw protocol bytes |
 | Proto gate | Proto ≥ 23 |
-| Data | Echoed selectors, sum_head, block checksums, delta fill data, MSG_SUCCESS, MSG_REDO, MSG_NO_SEND |
+| Data | Echoed selectors, echoed sum_head, delta stream (match tokens / literals) + whole-file checksum, MSG_REDO, MSG_NO_SEND |
 
 **Source:** Daemon output: `.upstream/main.c:1293`, `io_start_multiplex_out(f_out);`.  Receiver input: inherited from `.upstream/main.c:1399`, `io_start_multiplex_in(f_in);` (`io_start_multiplex_in` in `client_run()` receiver path, proto ≥ 23).
 
@@ -557,7 +557,7 @@ Trace for `rsync -av host::mod/ ./` (pull, proto 32).  Focus on the daemon socke
 - Digest list: space-separated, client preference wins.
 - Subprotocol value is always included in the greeting format string (`.upstream/compat.c:853`, `io_printf(f_out, "@RSYNCD: %d.%d %s\n", protocol_version, our_sub, tmpbuf);`, format `@RSYNCD: %d.%d %s\n`).  If the server's `sscanf` parse yields `remote_sub < 0` (parse failure), it is a fatal error for proto >= 30 (`.upstream/clientserver.c:217-226`, `if (remote_sub < 0) { ... }`) and defaults to 0 for proto < 30.
 - Digest list is always sent by modern rsync (`.upstream/compat.c:851-853` calls `get_default_nno_list()`).  For proto > 31 (proto 32+), omitting it, `get_default_nno_list(&valid_auth_checksums, tmpbuf, MAX_NSTR_STRLEN, '\0'); ... io_printf(f_out, "@RSYNCD: %d.%d %s\n", protocol_version, our_sub, tmpbuf);` is a fatal error (`.upstream/clientserver.c:234-240`, `} else if (remote_protocol > 31) { ... }`).  For proto 30-31, the receiver assumes `md5`; for proto < 30, it assumes `md4` (`.upstream/compat.c:555-556`, `else ... len = strlcpy(tmpbuf, protocol_version >= 30 ? "md5" : "md4", MAX_NSTR_STRLEN);`).
-- **MOTD:** when the daemon's `motd file` option is set, the daemon sends the file's content immediately after its greeting (`.upstream/clientserver.c:182-196`, `if (motd && *motd) { ... while (f && !feof(f)) { ... write_buf(f_out, buf, len); } ... write_sbuf(f_out, "\n"); }`).  Note the trailing `write_sbuf(f_out, "\n")` runs even when the file cannot be opened, so an unreadable motd file still produces a bare `\n` line after the greeting.  The client reads such lines in the module-response loop and drops them (see step 2).
+- **MOTD:** when the daemon's `motd file` option is set, the daemon sends the file's content immediately after its greeting (`.upstream/clientserver.c:184-198`, `if (motd && *motd) { ... write_sbuf(f_out, "\n");`).  Note the trailing `write_sbuf(f_out, "\n")` runs even when the file cannot be opened, so an unreadable motd file still produces a bare `\n` line after the greeting.  The client reads such lines in the module-response loop and drops them (see step 2).
 
 ### Step 2: Module selection (text)
 
@@ -574,7 +574,7 @@ mod/\n
 
 **Details:**
 - The module line is the module name only (no trailing slash): `io_printf` uses `modlen`, which excludes the `\0`-terminated `modname`'s appended `/`.
-- The client then loops on the daemon's response lines (`.upstream/clientserver.c:403-441`, `while (1) { if (!read_line_old(f_in, line, sizeof line, 0)) { ... } ... }`): `@RSYNCD: AUTHREQD ` → auth response, `@RSYNCD: OK` → done, `@RSYNCD: EXIT` → client exits (module-listing termination), `@ERROR...` → fatal, anything else (an MOTD line or a module-listing line) is printed at `-v` and **skipped**, and the loop reads the next line.
+- The client then loops on the daemon's response lines (`.upstream/clientserver.c:401-402`, `while (1) { ... if (!read_line_old(f_in, line, sizeof line, 0)) {`): `@RSYNCD: AUTHREQD ` → auth response, `@RSYNCD: OK` → done, `@RSYNCD: EXIT` → client exits (module-listing termination), `@ERROR...` → fatal, anything else (an MOTD line or a module-listing line) is printed at `-v` and **skipped**, and the loop reads the next line.
 
 ### Step 3: Authentication (text, optional)
 
@@ -832,16 +832,19 @@ ndx       : compressed NDX (proto ≥ 30) or int32 LE (older)
 iflags    : uint16 LE (proto ≥ 29)
 [type]    : uint8 (if ITEM_BASIS_TYPE_FOLLOWS)
 [xname]   : vstring (if ITEM_XNAME_FOLLOWS)
+[sum head]: count, blength, (s2length if proto ≥ 27), remainder -- all int32 LE (count 0 = null: no local copy)
+[block checksums]: sum1 int32 LE + sum2[s2length] per block (when count > 0)
 ```
 
 **Wire format (daemon → receiver, mux-wrapped):**
 ```
 MSG_DATA: [echoed selector bytes]
-MSG_DATA: [sum_head: count, blength, s2length, remainder -- all int32 LE]
-MSG_DATA: [block checksums: sum1[4] + sum2[s2length] per block]
-MSG_DATA: [delta fill data: raw bytes for mismatched regions]
-MSG_SUCCESS: [ndx as int32 LE]
+MSG_DATA: [echoed sum_head: count, blength, (s2length if proto ≥ 27), remainder -- all int32 LE]
+MSG_DATA: [delta stream: match tokens / literal data (32KB chunks), int32(0) end token]
+MSG_DATA: [whole-file checksum (16 bytes)]
 ```
+
+The receiver's sum struct (the block checksums of its local file) is sent by the *generator*, not the receiver: `generate_and_send_sums()` writes it to the daemon socket in the same stream as the selectors (`.upstream/generator.c:780-790`, `static int generate_and_send_sums(int fd, OFF_T len, int f_out, int f_copy) ... write_sum_head(f_out, &sum);`), and the daemon reads it with `receive_sums(f_in)` (`.upstream/sender.c:644`, `if (!(s = receive_sums(f_in))) {`).  `MSG_SUCCESS` does not ride the daemon socket in a plain pull -- the receiver sends it to the generator over the internal pipe (Channel 3; `send_msg_success()` at `.upstream/io.c:1204`, `send_msg_int(MSG_SUCCESS, num);`), and the daemon forwards one to the generator only for `--remove-source-files`/batch operation.
 
 **Process:** Generator → Daemon (Channel 1, raw for proto < 30 / multiplexed for proto ≥ 30), Daemon → Receiver (Channel 2, multiplexed)
 
@@ -857,27 +860,7 @@ MSG_SUCCESS: [ndx as int32 LE]
 - The generator interleaves selector sending with `check_for_finished_files()` and periodic `maybe_send_keepalive()` / `maybe_flush_socket()` to monitor the receiver's progress (`.upstream/generator.c:2818-2827`, `recv_generator(fbuf, file, ndx, itemizing, code, f_out); ... next_loopchk += loopchk_limit;`).  This allows the generator to pause if the receiver is behind.
 - For `inc_recurse`, the generator waits for sub-file-lists to arrive before continuing (`.upstream/generator.c:2836-2841`, `while (1) { ... }`).
 
-### Step 13: Final goodbye (binary)
-
-**Direction:** Bidirectional
-
-**Wire format:**
-```
-Generator → Daemon: 0x00  (NDX_DONE as compressed NDX)
-Daemon → Generator: 0x00  (NDX_DONE as compressed NDX, echoed)
-[proto ≥ 31: Generator → Daemon: 0x00, Daemon → Generator: 0x00]
-```
-
-**Process:** Generator ↔ Daemon
-
-**Source:** `.upstream/main.c:908-939`, `static void read_final_goodbye(int f_in, int f_out) ... }`, `.upstream/main.c:1154-1157`, `if (protocol_version >= 24) { ... }` (generator sends `write_ndx(f_out, NDX_DONE)` after `generate_files()` returns), `.upstream/main.c:996-997`, `if (protocol_version >= 24) ... read_final_goodbye(f_in, f_out);` (server reads via `read_final_goodbye()`).
-
-**Details for proto ≥ 31:**
-- Extra round-trip: after first NDX_DONE exchange, server writes another NDX_DONE and reads another from client.
-- For proto < 29: server reads `read_int(f_in)` and verifies `NDX_DONE`.
-- For proto 29-30: server reads via `read_ndx_and_attrs()` and verifies `NDX_DONE`.
-
-### Step 14: Stats exchange (binary, mux-wrapped)
+### Step 13: Stats exchange (binary, mux-wrapped)
 
 **Direction:** Server sender → Client receiver (for a pull operation)
 
@@ -901,6 +884,26 @@ varlong30(total_size)
   - **Client receiver:** `handle_stats(f_in)` -- reads stats from server (`.upstream/main.c:371-378`, `total_written = read_varlong30(f, 3); ... } else if (write_batch) {`).  Note: the first two fields are read in opposite order (total_written, then total_read) because the meaning of read/write swaps when switching from sender to receiver.
   - **Client sender:** `handle_stats(-1)` -- does nothing when `!am_sender` and `f < 0` (`.upstream/main.c:367`, `;`).  For `write_batch`, stats are written to the batch file (`.upstream/main.c:379-387`, `/* The --read-batch process is going to be a client ... }`).
 - Sent AFTER `send_files()` returns but BEFORE `read_final_goodbye()` (`.upstream/main.c:994-998`, `io_flush(FULL_FLUSH); ... io_flush(FULL_FLUSH);`).
+
+### Step 14: Final goodbye (binary)
+
+**Direction:** Bidirectional
+
+**Wire format:**
+```
+Generator → Daemon: 0x00  (NDX_DONE as compressed NDX)
+Daemon → Generator: 0x00  (NDX_DONE as compressed NDX, echoed)
+[proto ≥ 31: Generator → Daemon: 0x00, Daemon → Generator: 0x00]
+```
+
+**Process:** Generator ↔ Daemon
+
+**Source:** `.upstream/main.c:908-939`, `static void read_final_goodbye(int f_in, int f_out) ... }`, `.upstream/main.c:1154-1157`, `if (protocol_version >= 24) { ... }` (generator sends `write_ndx(f_out, NDX_DONE)` after `generate_files()` returns), `.upstream/main.c:996-997`, `if (protocol_version >= 24) ... read_final_goodbye(f_in, f_out);` (server reads via `read_final_goodbye()`).
+
+**Details for proto ≥ 31:**
+- Extra round-trip: after first NDX_DONE exchange, server writes another NDX_DONE and reads another from client.
+- For proto < 29: server reads `read_int(f_in)` and verifies `NDX_DONE`.
+- For proto 29-30: server reads via `read_ndx_and_attrs()` and verifies `NDX_DONE`.
 
 ### Module listing (`#list`) wire trace
 
@@ -961,7 +964,7 @@ Trace for `rsync -av user@host:/path/ ./` (pull, proto 32).
 
 ### Steps that differ from daemon socket
 
-SSH/rsh transport **skips** the daemon-socket-specific steps: greeting exchange (§5.1), module selection (§5.2), authentication (§5.3), and argument transmission (§5.4).  Instead, it has a binary version exchange.  All other steps (compat flags, checksum negotiation, seed exchange, filter list, file list, phase exchange, selector loop, final goodbye, stats) are identical to the daemon socket protocol.
+SSH/rsh transport **skips** the daemon-socket-specific steps: greeting exchange (§5.1), module selection (§5.2), authentication (§5.3), and argument transmission (§5.4).  Instead, it has a binary version exchange.  All other steps (compat flags, checksum negotiation, seed exchange, filter list, file list, phase exchange, selector loop, stats, final goodbye) are identical to the daemon socket protocol.
 
 ### Step 1: Remote process launch
 
@@ -1013,13 +1016,13 @@ Same as daemon socket §5.11.  Source: `.upstream/generator.c:2831-2929`., `if (
 
 Same as daemon socket §5.12.  Source: `.upstream/generator.c:588-597`., `if ((iflags & (SIGNIFICANT_ITEM_FLAGS|ITEM_REPORT_XATTR) || INFO_GTE(NAME, 2) ... write_vstring(sock_f_out, xname, strlen(xname));`
 
-### Step 10: Final goodbye
+### Step 10: Stats exchange
 
-Same as daemon socket §5.13.  Source: `.upstream/main.c:908-939`, `static void read_final_goodbye(int f_in, int f_out) ... }`, `.upstream/generator.c:2861`, `write_ndx(f_out, NDX_DONE);` (`write_ndx(f_out, NDX_DONE)`).
+Same as daemon socket §5.13.  Source: `.upstream/main.c:329-389`, `static void handle_stats(int f) ... }`.
 
-### Step 11: Stats exchange
+### Step 11: Final goodbye
 
-Same as daemon socket §5.14.  Source: `.upstream/main.c:329-389`, `static void handle_stats(int f) ... }`.
+Same as daemon socket §5.14.  Source: `.upstream/main.c:908-939`, `static void read_final_goodbye(int f_in, int f_out) ... }`, `.upstream/generator.c:2861`, `write_ndx(f_out, NDX_DONE);` (`write_ndx(f_out, NDX_DONE)`).
 
 ## 7. I/O mode resolution
 
@@ -1317,13 +1320,13 @@ Upstream uses two separate output paths with circular buffers (32KB default, `IO
 
 ### 10.4 Message dispatch (`read_a_msg()`)
 
-**Source:** `.upstream/io.c:1655`, `static void read_a_msg(void)`, `.upstream/io.c:1732-1738`, `case MSG_NOOP: ... /* Support protocol-30 keep-alive method. */`, `.upstream/io.c:1819-1846`, `case MSG_ERROR_SOCKET: ... case MSG_LOG: if (!am_generator) goto invalid_msg; ... rwrite((enum logcode)tag, data, msg_bytes, !am_generator);`.
+**Source:** `.upstream/io.c:1655`, `static void read_a_msg(void)`, `.upstream/io.c:1732-1733`, `case MSG_NOOP: ... /* Support protocol-30 keep-alive method. */`, `.upstream/io.c:1819-1824`, `case MSG_ERROR_SOCKET: ... goto invalid_msg;`.
 
 On a multiplexed channel the peer may interleave non-DATA control frames between MSG_DATA frames at any point.  `read_a_msg()` dispatches on the tag:
 
 - **Logging / no-op frames** -- `MSG_ERROR_XFER`, `MSG_INFO`, `MSG_ERROR`, `MSG_WARNING`, and (generator-side only: `!am_generator` → invalid message) `MSG_ERROR_SOCKET`, `MSG_ERROR_UTF8`, `MSG_CLIENT`, `MSG_LOG`: the payload is read (must be < `BIGPATHBUFLEN` or "multiplexing overflow" → `RERR_STREAMIO`) and passed to `rwrite()` for the log; **protocol processing continues**.  The table's direction column is the customary direction; the dispatch itself puts no role check on the four plain log codes, so a frame may arrive from either peer at any point and a data reader must consume and drop it rather than treat it as a protocol error.  `MSG_NOOP`: payload must be exactly 0 bytes; a sender receiving one may answer with its own keep-alive (the protocol-30 keep-alive method).
 - **Protocol frames** -- `MSG_STATS`, `MSG_REDO`, `MSG_IO_ERROR`, `MSG_IO_TIMEOUT`, `MSG_DELETED`, `MSG_SUCCESS`, `MSG_NO_SEND`, `MSG_ERROR_EXIT`: role-specific handling, each with a strict payload-size check (`.upstream/io.c:1689-1815`).
-- **Anything else** -- unknown tag, wrong payload size, or a logging payload of `BIGPATHBUFLEN` or more: "invalid multi-message" / "multiplexing overflow", and the process exits `RERR_STREAMIO` (`.upstream/io.c:1793-1801, 1832-1841`).
+- **Anything else** -- unknown tag, wrong payload size, or a logging payload of `BIGPATHBUFLEN` or more: "invalid multi-message" / "multiplexing overflow", and the process exits `RERR_STREAMIO` (`.upstream/io.c:1795-1799`, `invalid_msg: ... exit_cleanup(RERR_STREAMIO);`, `.upstream/io.c:1833-1838`, `overflow: ... exit_cleanup(RERR_STREAMIO);`).
 
 ## 11. File list wire format
 

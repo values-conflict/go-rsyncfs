@@ -212,7 +212,7 @@ func (r *Reader) ReadDataChunk() ([]byte, error) {
 
 // Read from the transparent buffer.  Fetches more MSG_DATA frames as needed.
 // This matches upstream's read_buf() behavior -- the caller never sees mux headers.
-// Peer logging and no-op control frames interleaved with the data (MSG_INFO and siblings) are skipped the way upstream's read_a_msg() forwards them to the log inline; any other non-DATA message still returns an error so the caller can use RecvMsg.
+// Peer logging and no-op control frames interleaved with the data (the MSG_INFO group, including the MSG_ERROR_XFER transfer-error frame, and the sibling log codes) are skipped the way upstream's read_a_msg() forwards them to the log inline; any other non-DATA message still returns an error so the caller can use RecvMsg.
 // Returns io.EOF only when the underlying reader returns EOF with no buffered data.
 func (r *Reader) Read(p []byte) (n int, err error) {
 	// Return buffered data first
@@ -289,7 +289,7 @@ func (r *Reader) readFrame() (code uint8, payload []byte, err error) {
 // isInfoMessage reports whether the peer's control frame is one of the logging / no-op messages that upstream's read_a_msg() forwards to the log (or ignores) inline, without interrupting the data stream -- a peer may send them at any point on a multiplexed channel (legitimate or otherwise), so a data reader must not treat them as protocol errors.
 func isInfoMessage(code uint8) bool {
 	switch code {
-	case MsgInfo, MsgError, MsgWarning, MsgErrorSocket, MsgLog, MsgClient, MsgErrorUTF8, MsgNoop:
+	case MsgErrorXfer, MsgInfo, MsgError, MsgWarning, MsgErrorSocket, MsgLog, MsgClient, MsgErrorUTF8, MsgNoop:
 		return true
 	}
 	return false
